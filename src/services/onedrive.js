@@ -69,10 +69,19 @@ async function getGraphClient() {
  * @param {string} legend - Codigo da legenda (usado como subpasta)
  */
 async function uploadFile(fileBuffer, fileName, legend) {
-  // Modo offline - salva apenas localmente
+  // Modo offline - salva localmente organizado por pasta
   if (!hasCredentials) {
-    const localPath = saveToTemp(fileBuffer, `${legend}_${fileName}`);
-    console.log(`[OFFLINE] Arquivo salvo localmente: ${localPath}`);
+    const baseDir = config.localFolder;
+    const folderPath = path.join(baseDir, legend);
+
+    if (!fs.existsSync(folderPath)) {
+      fs.mkdirSync(folderPath, { recursive: true });
+    }
+
+    const localPath = path.join(folderPath, fileName);
+    fs.writeFileSync(localPath, fileBuffer);
+
+    console.log(`[LOCAL] Arquivo salvo: ${localPath}`);
     return {
       success: true,
       offline: true,
@@ -131,31 +140,25 @@ async function uploadBatch(files, legend) {
 }
 
 /**
- * Salva arquivo localmente na pasta temp
+ * Salva arquivo localmente na pasta configurada
  */
 function saveToTemp(buffer, fileName) {
-  const tempDir = path.join(__dirname, '../../temp');
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
+  const baseDir = config.localFolder;
+  if (!fs.existsSync(baseDir)) {
+    fs.mkdirSync(baseDir, { recursive: true });
   }
 
-  const filePath = path.join(tempDir, fileName);
+  const filePath = path.join(baseDir, fileName);
   fs.writeFileSync(filePath, buffer);
 
   return filePath;
 }
 
 /**
- * Limpa pasta temp
+ * Limpa arquivos temporarios (nao limpa a pasta principal)
  */
 function clearTemp() {
-  const tempDir = path.join(__dirname, '../../temp');
-  if (fs.existsSync(tempDir)) {
-    const files = fs.readdirSync(tempDir);
-    files.forEach(file => {
-      fs.unlinkSync(path.join(tempDir, file));
-    });
-  }
+  // Nao limpa mais - fotos ficam salvas permanentemente
 }
 
 module.exports = {
