@@ -1,0 +1,30 @@
+# Dependencias
+node_modules/
+
+# Sessao do WhatsApp (NUNCA subir)
+session/
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Variaveis de ambiente (contem senhas)
+.env
+
+# Arquivos temporarios
+temp/
+reports/
+logs/
+
+# Chaves privadas
+*.pem
+*.key
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Scratchpad do Claude
+.claude/
