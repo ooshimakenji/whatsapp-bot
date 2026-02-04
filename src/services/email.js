@@ -2,7 +2,7 @@ const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
-const { ensureDir, getReportsFolder } = require('./storage');
+const { ensureDir, getPhotosFolder } = require('./storage');
 
 // Configuracao do transporter
 let transporter = null;
@@ -29,6 +29,8 @@ let dailyStats = {
   totalBatches: 0,
   batchesWithAS: 0,
   batchesWithoutAS: 0,
+  totalDuplicates: 0,
+  batchesWithDuplicates: [],
   pendingAS: [],
   details: []
 };
@@ -47,6 +49,8 @@ function logActivity(activity) {
       totalBatches: 0,
       batchesWithAS: 0,
       batchesWithoutAS: 0,
+      totalDuplicates: 0,
+      batchesWithDuplicates: [],
       pendingAS: [],
       details: []
     };
@@ -62,6 +66,18 @@ function logActivity(activity) {
     dailyStats.totalBatches++;
     dailyStats.totalPhotos += activity.photoCount || 0;
     dailyStats.batchesWithAS++;
+
+    // Registra duplicatas
+    if (activity.duplicates && activity.duplicates > 0) {
+      dailyStats.totalDuplicates += activity.duplicates;
+      dailyStats.batchesWithDuplicates.push({
+        time: new Date().toLocaleTimeString('pt-BR'),
+        collaborator: activity.collaborator,
+        as: activity.message.split(' - ')[0].replace('AS ', ''),
+        duplicates: activity.duplicates,
+        photoCount: activity.photoCount
+      });
+    }
   } else if (activity.type === 'batch_no_as') {
     dailyStats.totalBatches++;
     dailyStats.totalPhotos += activity.photoCount || 0;
@@ -86,7 +102,7 @@ function logActivity(activity) {
  * Salva estatisticas em arquivo JSON
  */
 function saveStatsToFile() {
-  const reportsDir = getReportsFolder();
+  const reportsDir = getPhotosFolder();
   ensureDir(reportsDir);
 
   const fileName = `relatorio_${dailyStats.date}.json`;
@@ -100,7 +116,13 @@ function saveStatsToFile() {
  * Gera HTML do relatorio
  */
 function generateReportHtml() {
-  const pendingSection = dailyStats.pendingAS.length > 0 ? `
+  // Garante que arrays existam
+  const pendingAS = dailyStats.pendingAS || [];
+  const batchesWithDuplicates = dailyStats.batchesWithDuplicates || [];
+  const details = dailyStats.details || [];
+  const totalDuplicates = dailyStats.totalDuplicates || 0;
+
+  const pendingSection = pendingAS.length > 0 ? `
     <h2 style="color: #dc3545;">AS Pendentes para Cobranca</h2>
     <table>
       <tr>
@@ -109,12 +131,35 @@ function generateReportHtml() {
         <th>Pasta</th>
         <th>Fotos</th>
       </tr>
-      ${dailyStats.pendingAS.map(p => `
+      ${pendingAS.map(p => `
         <tr style="background: #fff3cd;">
           <td>${p.time}</td>
           <td><strong>${p.collaborator}</strong></td>
           <td>${p.folder}</td>
           <td>${p.photoCount}</td>
+        </tr>
+      `).join('')}
+    </table>
+  ` : '';
+
+  const duplicatesSection = batchesWithDuplicates.length > 0 ? `
+    <h2 style="color: #ff9800;">Fotos Duplicadas Detectadas</h2>
+    <p>Total: <strong>${totalDuplicates}</strong> foto(s) duplicada(s) em ${batchesWithDuplicates.length} lote(s)</p>
+    <table>
+      <tr>
+        <th>Hora</th>
+        <th>Colaborador</th>
+        <th>AS</th>
+        <th>Duplicadas</th>
+        <th>Total Fotos</th>
+      </tr>
+      ${batchesWithDuplicates.map(d => `
+        <tr style="background: #fff3e0;">
+          <td>${d.time}</td>
+          <td><strong>${d.collaborator}</strong></td>
+          <td>${d.as}</td>
+          <td style="color: #ff9800; font-weight: bold;">${d.duplicates}</td>
+          <td>${d.photoCount}</td>
         </tr>
       `).join('')}
     </table>
@@ -146,6 +191,7 @@ function generateReportHtml() {
         <strong>Resumo:</strong> ${dailyStats.totalBatches} lotes | ${dailyStats.totalPhotos} fotos |
         <span class="success">${dailyStats.batchesWithAS} com AS</span> |
         <span class="failed">${dailyStats.batchesWithoutAS} sem AS</span>
+        ${totalDuplicates > 0 ? `| <span class="warning">${totalDuplicates} duplicadas</span>` : ''}
       </div>
 
       <div class="stats">
@@ -157,6 +203,8 @@ function generateReportHtml() {
 
       ${pendingSection}
 
+      ${duplicatesSection}
+
       <h2>Historico Completo</h2>
       <table>
         <tr>
@@ -164,7 +212,7 @@ function generateReportHtml() {
           <th>Tipo</th>
           <th>Detalhes</th>
         </tr>
-        ${dailyStats.details.map(d => `
+        ${details.map(d => `
           <tr>
             <td>${d.time}</td>
             <td>${d.type}</td>
@@ -192,8 +240,9 @@ async function sendDailyReport() {
   try {
     const html = generateReportHtml();
 
-    const subject = dailyStats.pendingAS.length > 0
-      ? `[ATENCAO] ${dailyStats.pendingAS.length} AS Pendentes - Relatorio ${dailyStats.date}`
+    const pendingAS = dailyStats.pendingAS || [];
+    const subject = pendingAS.length > 0
+      ? `[ATENCAO] ${pendingAS.length} AS Pendentes - Relatorio ${dailyStats.date}`
       : `Relatorio Bot WhatsApp - ${dailyStats.date}`;
 
     const info = await transporter.sendMail({
@@ -222,7 +271,7 @@ function getStats() {
  * Retorna lista de AS pendentes
  */
 function getPendingAS() {
-  return [...dailyStats.pendingAS];
+  return [...(dailyStats.pendingAS || [])];
 }
 
 /**
@@ -230,13 +279,23 @@ function getPendingAS() {
  */
 function loadStatsFromFile() {
   const today = new Date().toISOString().split('T')[0];
-  const reportsDir = getReportsFolder();
+  const photosDir = getPhotosFolder();
   const fileName = `relatorio_${today}.json`;
-  const filePath = path.join(reportsDir, fileName);
+  const filePath = path.join(photosDir, fileName);
 
   if (fs.existsSync(filePath)) {
     try {
-      dailyStats = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      const loaded = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+
+      // Garante que campos novos existam (compatibilidade)
+      dailyStats = {
+        ...dailyStats,
+        ...loaded,
+        totalDuplicates: loaded.totalDuplicates || 0,
+        batchesWithDuplicates: loaded.batchesWithDuplicates || [],
+        pendingAS: loaded.pendingAS || [],
+        details: loaded.details || []
+      };
     } catch (e) {
       console.log('Iniciando novo relatorio do dia');
     }

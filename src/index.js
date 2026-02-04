@@ -106,4 +106,41 @@ process.on('unhandledRejection', (reason) => {
   console.error('Promise rejeitada:', reason);
 });
 
+// Flag para evitar envio duplicado
+let isShuttingDown = false;
+
+// Encerramento gracioso (Ctrl+C ou kill)
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`\n\nRecebido ${signal}. Encerrando...`);
+
+  try {
+    console.log('Enviando relatorio antes de encerrar...');
+    await sendDailyReport();
+    console.log('Relatorio enviado!');
+  } catch (error) {
+    console.error('Erro ao enviar relatorio:', error.message);
+  }
+
+  console.log('Bot encerrado.');
+  process.exit(0);
+}
+
+// Captura sinais de encerramento
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));   // Ctrl+C
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // kill
+
+// Windows: captura evento de fechar janela
+if (process.platform === 'win32') {
+  const readline = require('readline');
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  rl.on('SIGINT', () => gracefulShutdown('SIGINT'));
+}
+
 main();

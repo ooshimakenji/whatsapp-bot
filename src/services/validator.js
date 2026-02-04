@@ -29,23 +29,61 @@ function validateLegend(legend) {
   if (!legend || typeof legend !== 'string') {
     return {
       valid: false,
-      reason: 'Legenda vazia ou invalida'
+      reason: 'VAZIO'
     };
   }
 
   const trimmed = legend.trim();
 
-  // Verifica formato com regex
-  if (!config.legendPattern.test(trimmed)) {
+  // Ignora se nao parece ser um numero
+  if (!/^\d+$/.test(trimmed)) {
     return {
       valid: false,
-      reason: 'Formato invalido. Use: 202XXXXXXX (10 digitos)',
+      reason: 'NAO_NUMERICO'
+    };
+  }
+
+  // Verifica quantidade de digitos
+  if (trimmed.length < 10) {
+    const faltam = 10 - trimmed.length;
+    return {
+      valid: false,
+      reason: 'FALTAM_DIGITOS',
+      faltam: faltam,
       received: trimmed
     };
   }
 
+  if (trimmed.length > 10) {
+    return {
+      valid: false,
+      reason: 'MUITOS_DIGITOS',
+      received: trimmed
+    };
+  }
+
+  // Verifica se comeca com 202
+  if (!trimmed.startsWith('202')) {
+    return {
+      valid: false,
+      reason: 'NAO_COMECA_202',
+      received: trimmed
+    };
+  }
+
+  // Verifica se e 2025 ou 2026 (aceita direto)
+  if (trimmed.startsWith('2025') || trimmed.startsWith('2026')) {
+    return {
+      valid: true,
+      needsConfirmation: false,
+      code: trimmed
+    };
+  }
+
+  // Outros 202X (ex: 2024, 2027) - pede confirmacao
   return {
     valid: true,
+    needsConfirmation: true,
     code: trimmed
   };
 }
