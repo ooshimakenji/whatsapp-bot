@@ -31,6 +31,14 @@ const photoDebounce = new Map();  // Timer para agrupar fotos
 const REMINDER_TIME = 2 * 60 * 1000;  // 2 minutos
 const TIMEOUT_TIME = 5 * 60 * 1000;   // 5 minutos
 const PHOTO_DEBOUNCE_TIME = 5 * 1000; // 5 segundos para agrupar fotos
+const MESSAGE_DELAY = 800;            // 800ms entre mensagens (evita ordem invertida)
+
+/**
+ * Delay entre mensagens para garantir ordem
+ */
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // Estados da sessao
 const STATE = {
@@ -742,6 +750,7 @@ async function sendPhotoFeedback(number, chat, session) {
       `Fotos: *${session.photos.length}*\n` +
       `AS: *${session.legend}*`
     );
+    await delay(MESSAGE_DELAY);
 
     await sendYesNo(chat, `FINALIZAR AS: *${session.legend}*?`);
     setTimeout5min(number, chat, () => doSend(number, chat, session));
@@ -1087,6 +1096,7 @@ async function doSend(number, chat, session) {
     }
 
     await chat.sendMessage(`AS *${session.legend}* enviada com sucesso! ✅`);
+    await delay(MESSAGE_DELAY);
 
     // Log com informacao de duplicatas
     const logData = {
