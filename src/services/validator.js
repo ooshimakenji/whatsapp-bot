@@ -1,4 +1,3 @@
-const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
@@ -22,16 +21,11 @@ function loadCollaborators() {
 // Carrega ao iniciar
 loadCollaborators();
 
-const anthropic = new Anthropic({
-  apiKey: config.claude.apiKey
-});
-
 /**
- * Valida a legenda usando Claude API
- * Formato esperado: 202XXXXXXXXX (202 + 9 digitos)
+ * Valida a legenda usando regex local
+ * Formato esperado: 202XXXXXXX (202 + 7 digitos = 10 caracteres)
  */
-async function validateLegend(legend) {
-  // Validacao local primeiro (mais rapido)
+function validateLegend(legend) {
   if (!legend || typeof legend !== 'string') {
     return {
       valid: false,
@@ -45,48 +39,21 @@ async function validateLegend(legend) {
   if (!config.legendPattern.test(trimmed)) {
     return {
       valid: false,
-      reason: 'Formato invalido. Use: 202XXXXXXX (202 + 7 digitos = 10 caracteres)'
+      reason: 'Formato invalido. Use: 202XXXXXXX (10 digitos)',
+      received: trimmed
     };
   }
 
-  // Usa Claude para validacao adicional se necessario
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 100,
-      messages: [
-        {
-          role: 'user',
-          content: `Valide se este codigo "${trimmed}" esta no formato correto: deve comecar com 202 seguido de exatamente 7 digitos numericos (total 10 caracteres). Responda apenas "VALIDO" ou "INVALIDO: motivo".`
-        }
-      ]
-    });
-
-    const result = response.content[0].text.trim();
-
-    // Normaliza removendo acentos para comparacao
-    const normalized = result.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-
-    if (normalized.startsWith('VALIDO')) {
-      return { valid: true, code: trimmed };
-    } else {
-      return {
-        valid: false,
-        reason: result.replace(/INV[ÁA]LIDO:/gi, '').trim()
-      };
-    }
-  } catch (error) {
-    // Se Claude falhar, usa apenas validacao local
-    console.error('Erro na validacao Claude:', error.message);
-    return { valid: true, code: trimmed };
-  }
+  return {
+    valid: true,
+    code: trimmed
+  };
 }
 
 /**
  * Verifica se numero esta autorizado
  */
 function isNumberAllowed(number) {
-  // Remove caracteres nao numericos
   const cleanNumber = number.replace(/\D/g, '');
 
   // Se tem lista de colaboradores, usa ela

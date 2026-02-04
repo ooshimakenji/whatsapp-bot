@@ -2,114 +2,108 @@
  * Bot WhatsApp - Ponto de entrada
  *
  * Funcionalidades:
- * - Recebe fotos com legendas numericas (202XXXXXXXXX)
- * - Valida legendas com Claude API
+ * - Recebe fotos com legendas (AS no formato 202XXXXXXX)
+ * - Valida formato da AS localmente
  * - Minimo 3 fotos por lote
- * - Upload automatico para OneDrive
- * - Relatorio diario por email
+ * - Salva em pasta local configuravel
+ * - Relatorio diario por email + arquivo local
  */
 
 const config = require('./config');
 const { initialize } = require('./bot/whatsapp');
-const { sendDailyReport, getStats } = require('./services/email');
+const { sendDailyReport } = require('./services/email');
+const { ensureDir, getPhotosFolder, getReportsFolder } = require('./services/storage');
 
-// Verifica configuracoes essenciais
+// Verifica configuracoes
 function checkConfig() {
-  const missing = [];
+  const warnings = [];
 
-  if (!config.claude.apiKey) missing.push('CLAUDE_API_KEY');
-  if (!config.microsoft.clientId) missing.push('MICROSOFT_CLIENT_ID');
-  if (!config.microsoft.clientSecret) missing.push('MICROSOFT_CLIENT_SECRET');
-  if (!config.microsoft.tenantId) missing.push('MICROSOFT_TENANT_ID');
-
-  if (missing.length > 0) {
-    console.log('\n========================================');
-    console.log('ATENCAO: Configuracoes faltando no .env');
-    console.log('========================================');
-    missing.forEach(m => console.log(`- ${m}`));
-    console.log('\nEdite o arquivo .env e preencha os valores.');
-    console.log('O bot vai iniciar, mas algumas funcoes nao vao funcionar.\n');
+  if (!config.claude.apiKey) {
+    warnings.push('CLAUDE_API_KEY nao configurada (respostas inteligentes desativadas)');
   }
 
-  return missing.length === 0;
+  if (!config.email.user || !config.email.pass) {
+    warnings.push('Email nao configurado (relatorios apenas locais)');
+  }
+
+  if (warnings.length > 0) {
+    console.log('\nAvisos:');
+    warnings.forEach(w => console.log(`- ${w}`));
+    console.log('');
+  }
+
+  return warnings.length === 0;
 }
 
-// Agenda envio do relatorio diario (23:59)
+// Agenda relatorio diario (23:59)
 function scheduleDailyReport() {
   const now = new Date();
-  const targetHour = 23;
-  const targetMinute = 59;
-
-  let target = new Date(
+  const target = new Date(
     now.getFullYear(),
     now.getMonth(),
     now.getDate(),
-    targetHour,
-    targetMinute,
-    0
+    23, 59, 0
   );
 
-  // Se ja passou do horario hoje, agenda para amanha
   if (now >= target) {
     target.setDate(target.getDate() + 1);
   }
 
   const delay = target - now;
-
-  console.log(`Relatorio diario agendado para: ${target.toLocaleString('pt-BR')}`);
+  console.log(`Relatorio agendado: ${target.toLocaleString('pt-BR')}`);
 
   setTimeout(async () => {
-    console.log('Enviando relatorio diario...');
+    console.log('Enviando relatorio...');
     await sendDailyReport();
-
-    // Reagenda para o proximo dia
     scheduleDailyReport();
   }, delay);
 }
 
-// Funcao principal
+// Inicializacao
 async function main() {
   console.log('\n========================================');
   console.log('       BOT WHATSAPP - INICIANDO');
   console.log('========================================\n');
 
-  // Verifica configuracoes
+  // Cria pastas necessarias
+  ensureDir(getPhotosFolder());
+  ensureDir(getReportsFolder());
+
+  // Verifica configs
   checkConfig();
 
-  // Mostra configuracoes atuais
+  // Mostra configuracoes
   console.log('Configuracoes:');
-  console.log(`- Pasta OneDrive: ${config.onedrive.folder}`);
-  console.log(`- Minimo fotos/lote: ${config.minPhotosPerBatch}`);
-  console.log(`- Numeros autorizados: ${config.allowedNumbers.length === 0 ? 'TODOS' : config.allowedNumbers.join(', ')}`);
+  console.log(`- Pasta fotos: ${getPhotosFolder()}`);
+  console.log(`- Pasta relatorios: ${getReportsFolder()}`);
+  console.log(`- Min fotos/lote: ${config.minPhotosPerBatch}`);
+  console.log(`- Numeros autorizados: ${config.allowedNumbers.length === 0 ? 'TODOS' : config.allowedNumbers.length}`);
   console.log('');
 
-  // Inicia o bot WhatsApp
+  // Inicia bot
   initialize();
 
-  // Agenda relatorio diario
-  if (config.email.user && config.email.to) {
-    scheduleDailyReport();
-  } else {
-    console.log('Email nao configurado - relatorio diario desativado');
-  }
+  // Agenda relatorio
+  scheduleDailyReport();
 
-  // Mostra comandos disponiveis
-  console.log('\nComandos no WhatsApp:');
-  console.log('- FOTOS: inicia envio de fotos');
-  console.log('- ENVIAR: faz upload do lote');
-  console.log('- PROXIMO: inicia proximo lote');
-  console.log('- AJUDA: mostra ajuda');
+  // Comandos
+  console.log('Comandos WhatsApp:');
+  console.log('- FOTOS: iniciar lote');
+  console.log('- ENVIAR: salvar lote');
+  console.log('- PROXIMO: novo lote');
+  console.log('- CANCELAR: descartar');
+  console.log('- STATUS: ver lote atual');
+  console.log('- AJUDA: comandos');
   console.log('');
 }
 
-// Trata erros nao capturados
+// Erros globais
 process.on('uncaughtException', (error) => {
-  console.error('Erro nao tratado:', error);
+  console.error('Erro:', error);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
   console.error('Promise rejeitada:', reason);
 });
 
-// Inicia
 main();

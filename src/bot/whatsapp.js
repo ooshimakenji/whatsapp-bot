@@ -1,24 +1,36 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, Poll, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const fs = require('fs');
-const path = require('path');
 const config = require('../config');
-const { validateLegend, isNumberAllowed, getCollaboratorName } = require('../services/validator');
-const { uploadBatch, saveToTemp, clearTemp, isConfigured: isOnedriveConfigured } = require('../services/onedrive');
+const { validateLegend, isNumberAllowed } = require('../services/validator');
+const { saveBatch, getPhotosFolder } = require('../services/storage');
 const { logActivity } = require('../services/email');
 
-// Armazena lotes pendentes por usuario
-// Formato: { 'numero': { active: bool, legend: string|null, photos: [], waitingLegend: bool, lastUpdate: Date } }
-const pendingBatches = new Map();
+// Sessoes ativas por usuario
+const sessions = new Map();
 
-// Delay para respostas mais naturais (1-3 segundos)
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const naturalDelay = () => delay(1000 + Math.random() * 2000);
+// Cache do grupo de supervisores
+let supervisorChat = null;
 
-// Timeout para limpar lotes incompletos (30 minutos)
-const BATCH_TIMEOUT = 30 * 60 * 1000;
+// Timers de lembrete e timeout
+const reminders = new Map();
+const timeouts = new Map();
 
-// Cria cliente WhatsApp
+// Constantes de tempo
+const REMINDER_TIME = 2 * 60 * 1000;  // 2 minutos
+const TIMEOUT_TIME = 5 * 60 * 1000;   // 5 minutos
+
+// Estados da sessao
+const STATE = {
+  IDLE: 'idle',
+  COLLECTING: 'collecting',
+  READY_TO_SEND: 'ready_to_send',
+  WAITING_ACTION: 'waiting_action'
+};
+
+// Cumprimentos reconhecidos
+const GREETINGS = ['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'hey', 'eai', 'e ai'];
+
+// Cliente WhatsApp
 const client = new Client({
   authStrategy: new LocalAuth({
     dataPath: './session'
@@ -30,48 +42,233 @@ const client = new Client({
 });
 
 /**
+ * Retorna cumprimento baseado no horario
+ */
+function getGreeting() {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 12) return 'Bom dia';
+  if (hour >= 12 && hour < 18) return 'Boa tarde';
+  return 'Boa noite';
+}
+
+/**
+ * Verifica se texto e um cumprimento
+ */
+function isGreeting(text) {
+  const normalized = text.toLowerCase().trim();
+  return GREETINGS.some(g => normalized.includes(g));
+}
+
+/**
+ * Obtem nome do contato
+ */
+async function getContactName(message) {
+  try {
+    const contact = await message.getContact();
+    return contact.pushname || contact.name || contact.number;
+  } catch {
+    return 'Colaborador';
+  }
+}
+
+/**
+ * Cria ou obtem sessao do usuario
+ */
+function getSession(number) {
+  if (!sessions.has(number)) {
+    sessions.set(number, {
+      state: STATE.IDLE,
+      photos: [],
+      legend: null,
+      collaboratorName: null,
+      todayCount: 0
+    });
+  }
+  return sessions.get(number);
+}
+
+/**
+ * Limpa timers do usuario
+ */
+function clearTimers(number) {
+  if (reminders.has(number)) {
+    clearTimeout(reminders.get(number));
+    reminders.delete(number);
+  }
+  if (timeouts.has(number)) {
+    clearTimeout(timeouts.get(number));
+    timeouts.delete(number);
+  }
+}
+
+/**
+ * Configura lembrete de 2 minutos
+ */
+function setReminder(number, chat, session) {
+  clearTimers(number);
+
+  reminders.set(number, setTimeout(async () => {
+    if (session.state === STATE.COLLECTING) {
+      const missing = config.minPhotosPerBatch - session.photos.length;
+      if (missing > 0) {
+        await chat.sendMessage(`Faltam ${missing} foto(s) para completar o envio.`);
+      } else if (!session.legend) {
+        await chat.sendMessage(`Falta informar a AS (formato 202XXXXXXX).`);
+      }
+    }
+  }, REMINDER_TIME));
+}
+
+/**
+ * Configura timeout de 5 minutos
+ */
+function setTimeout5min(number, chat) {
+  clearTimers(number);
+
+  timeouts.set(number, setTimeout(() => {
+    const session = sessions.get(number);
+    if (session && session.state !== STATE.IDLE) {
+      console.log(`Sessao expirada: ${number}`);
+      sessions.delete(number);
+      clearTimers(number);
+    }
+  }, TIMEOUT_TIME));
+}
+
+/**
+ * Busca o grupo de supervisores pelo nome
+ */
+async function findSupervisorGroup() {
+  if (!config.supervisorGroup) {
+    return null;
+  }
+
+  if (supervisorChat) {
+    return supervisorChat;
+  }
+
+  try {
+    const chats = await client.getChats();
+    const group = chats.find(chat =>
+      chat.isGroup && chat.name.toLowerCase() === config.supervisorGroup.toLowerCase()
+    );
+
+    if (group) {
+      supervisorChat = group;
+      console.log(`Grupo de supervisores encontrado: ${group.name}`);
+      return group;
+    }
+
+    console.log(`Grupo "${config.supervisorGroup}" nao encontrado.`);
+    return null;
+  } catch (error) {
+    console.error('Erro ao buscar grupo:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Envia fotos para o grupo de supervisores com retry
+ */
+async function sendToSupervisors(session, retries = 3) {
+  const group = await findSupervisorGroup();
+
+  if (!group) {
+    return { success: false, reason: 'Grupo nao configurado ou nao encontrado' };
+  }
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      // Envia mensagem com info do lote
+      await group.sendMessage(`*AS ${session.legend}* - ${session.collaboratorName}`);
+
+      // Envia cada foto
+      for (const photo of session.photos) {
+        const media = new MessageMedia(
+          'image/jpeg',
+          photo.buffer.toString('base64'),
+          photo.fileName
+        );
+        await group.sendMessage(media);
+      }
+
+      console.log(`Fotos enviadas para supervisores: AS ${session.legend}`);
+      return { success: true };
+
+    } catch (error) {
+      console.error(`Tentativa ${attempt}/${retries} falhou:`, error.message);
+
+      if (attempt < retries) {
+        // Aguarda 2 segundos antes de tentar novamente
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+  }
+
+  return { success: false, reason: 'Falha apos 3 tentativas' };
+}
+
+/**
+ * Envia enquete
+ */
+async function sendPoll(chat, title, options) {
+  try {
+    // Tenta enviar poll nativo
+    await chat.sendMessage(new Poll(title, options));
+    return true;
+  } catch (error) {
+    // Fallback: envia como texto formatado
+    const optionsText = options.map((opt, i) => `${i + 1}. ${opt}`).join('\n');
+    await chat.sendMessage(`${title}\n\n${optionsText}\n\n_Digite o numero da opcao._`);
+    return false;
+  }
+}
+
+/**
  * Inicializa o bot
  */
 function initialize() {
-  // Evento: QR Code para conectar
   client.on('qr', (qr) => {
-    console.log('\n========================================');
-    console.log('Escaneie o QR Code abaixo com seu WhatsApp:');
-    console.log('========================================\n');
+    console.log('\nEscaneie o QR Code:');
     qrcode.generate(qr, { small: true });
   });
 
-  // Evento: Conectado
-  client.on('ready', () => {
-    console.log('\n========================================');
-    console.log('Bot WhatsApp conectado e pronto!');
-    console.log('========================================\n');
+  client.on('ready', async () => {
+    console.log('\nBot conectado e pronto.');
+    console.log(`Pasta de fotos: ${getPhotosFolder()}`);
+
+    // Busca grupo de supervisores
+    if (config.supervisorGroup) {
+      console.log(`Buscando grupo: ${config.supervisorGroup}...`);
+      await findSupervisorGroup();
+    }
   });
 
-  // Evento: Autenticado
   client.on('authenticated', () => {
-    console.log('Autenticacao bem sucedida!');
+    console.log('Autenticado.');
   });
 
-  // Evento: Falha na autenticacao
   client.on('auth_failure', (msg) => {
     console.error('Falha na autenticacao:', msg);
   });
 
-  // Evento: Desconectado
   client.on('disconnected', (reason) => {
-    console.log('Bot desconectado:', reason);
+    console.log('Desconectado:', reason);
   });
 
-  // Evento: Mensagem recebida
   client.on('message', handleMessage);
 
-  // Inicia o cliente
+  // Listener para respostas de enquete
+  client.on('message_create', async (message) => {
+    if (message.fromMe) return;
+
+    // Processa votos em enquetes
+    if (message.type === 'poll_response') {
+      await handlePollResponse(message);
+    }
+  });
+
   client.initialize();
-
-  // Limpa lotes antigos periodicamente
-  setInterval(cleanOldBatches, 60000);
-
   return client;
 }
 
@@ -84,431 +281,333 @@ async function handleMessage(message) {
     const number = contact.number;
     const chat = await message.getChat();
 
-    // Verifica se numero esta autorizado
     if (!isNumberAllowed(number)) {
-      console.log(`Numero nao autorizado: ${number}`);
-      logActivity({
-        type: 'rejected',
-        message: `Numero nao autorizado: ${number}`
-      });
+      console.log(`Bloqueado: ${number}`);
+      logActivity({ type: 'rejected', message: `Numero bloqueado: ${number}` });
       return;
     }
 
-    // Se for foto
-    if (message.hasMedia) {
-      await handlePhoto(message, number, chat);
+    const session = getSession(number);
+
+    // Atualiza nome do colaborador
+    if (!session.collaboratorName) {
+      session.collaboratorName = await getContactName(message);
     }
-    // Se for texto (comandos ou legenda)
-    else if (message.body) {
-      await handleText(message, number, chat);
+
+    // Processa baseado no tipo de mensagem
+    if (message.hasMedia) {
+      await handlePhoto(message, number, chat, session);
+    } else if (message.body) {
+      await handleText(message, number, chat, session);
     }
   } catch (error) {
-    console.error('Erro ao processar mensagem:', error);
+    console.error('Erro:', error.message);
   }
 }
 
 /**
  * Processa foto recebida
  */
-async function handlePhoto(message, number, chat) {
-  const batch = pendingBatches.get(number);
+async function handlePhoto(message, number, chat, session) {
+  // Se estava idle, inicia coleta
+  if (session.state === STATE.IDLE) {
+    session.state = STATE.COLLECTING;
+    session.photos = [];
+    session.legend = null;
+  }
 
-  // Verifica se tem lote ativo
-  if (!batch || !batch.active) {
-    await naturalDelay();
-    await chat.sendMessage(
-      'Para enviar fotos, primeiro digite *FOTOS* para iniciar.'
-    );
-    return;
+  // Se estava esperando acao pos-envio, inicia novo lote
+  if (session.state === STATE.WAITING_ACTION) {
+    session.state = STATE.COLLECTING;
+    session.photos = [];
+    session.legend = null;
   }
 
   const caption = message.body || '';
 
-  // Se tem legenda, valida
+  // Verifica legenda na foto
   if (caption.trim()) {
-    const validation = await validateLegend(caption);
-
+    const validation = validateLegend(caption);
     if (validation.valid) {
-      // Verifica se ja tem legenda diferente no lote
-      if (batch.legend && batch.legend !== validation.code) {
-        await naturalDelay();
-        await chat.sendMessage(
-          `Erro: Legenda diferente detectada!\n` +
-          `Lote atual: ${batch.legend}\n` +
-          `Legenda enviada: ${validation.code}\n\n` +
-          `Use apenas uma legenda por lote.`
-        );
+      if (session.legend && session.legend !== validation.code) {
+        await chat.sendMessage(`AS diferente do lote atual (${session.legend}).`);
         return;
       }
-      batch.legend = validation.code;
+      session.legend = validation.code;
     }
   }
 
-  // Baixa a midia
+  // Baixa foto
   const media = await message.downloadMedia();
   if (!media) {
-    await naturalDelay();
-    await chat.sendMessage('Erro ao baixar a foto. Tente novamente.');
+    await chat.sendMessage('Erro ao baixar foto. Reenvie.');
     return;
   }
 
-  // Cria buffer da foto
   const buffer = Buffer.from(media.data, 'base64');
   const extension = media.mimetype.split('/')[1] || 'jpg';
   const fileName = `foto_${Date.now()}.${extension}`;
 
-  batch.photos.push({ buffer, fileName });
-  batch.lastUpdate = new Date();
+  session.photos.push({ buffer, fileName });
 
-  // Salva localmente como backup
-  const tempName = batch.legend ? `${batch.legend}_${fileName}` : `temp_${number}_${fileName}`;
-  saveToTemp(buffer, tempName);
+  // Configura lembrete
+  setReminder(number, chat, session);
 
-  const remaining = config.minPhotosPerBatch - batch.photos.length;
-  const legendaStatus = batch.legend ? `AS: ${batch.legend}` : 'AS: pendente';
+  // Verifica se lote esta completo
+  const hasMinPhotos = session.photos.length >= config.minPhotosPerBatch;
+  const hasLegend = !!session.legend;
 
-  await naturalDelay();
-  if (remaining > 0) {
+  if (hasMinPhotos && hasLegend) {
+    session.state = STATE.READY_TO_SEND;
+    clearTimers(number);
+
     await chat.sendMessage(
-      `Foto ${batch.photos.length} recebida (${legendaStatus})\n` +
-      `Envie mais ${remaining} foto(s) para completar o minimo de ${config.minPhotosPerBatch}.`
+      `*Resumo do lote:*\n` +
+      `- Fotos: ${session.photos.length}\n` +
+      `- AS: ${session.legend}`
     );
+
+    await sendPoll(chat, 'Deseja enviar?', ['Sim, enviar', 'Adicionar mais fotos']);
+    setTimeout5min(number, chat);
+
   } else {
-    await chat.sendMessage(
-      `Foto ${batch.photos.length} recebida (${legendaStatus})\n` +
-      `Lote com ${batch.photos.length} fotos!\n\n` +
-      `Digite *ENVIAR* para fazer upload.`
-    );
+    // Feedback do progresso
+    const remaining = config.minPhotosPerBatch - session.photos.length;
+    let status = `Foto ${session.photos.length} recebida.`;
+
+    if (remaining > 0) {
+      status += ` Faltam ${remaining}.`;
+    }
+    if (!hasLegend) {
+      status += ` AS pendente.`;
+    }
+
+    await chat.sendMessage(status);
   }
 }
 
 /**
  * Processa texto/comandos
  */
-async function handleText(message, number, chat) {
-  const text = message.body.trim().toUpperCase();
-  const batch = pendingBatches.get(number);
+async function handleText(message, number, chat, session) {
+  const text = message.body.trim();
+  const textUpper = text.toUpperCase();
 
-  // Comando FOTOS - inicia novo lote
-  if (text === 'FOTOS') {
-    await startBatch(number, chat);
+  // Verifica resposta numerica (fallback de enquete)
+  if (session.state === STATE.READY_TO_SEND) {
+    if (textUpper === '1' || textUpper === 'SIM' || textUpper === 'ENVIAR') {
+      await doSend(number, chat, session);
+      return;
+    }
+    if (textUpper === '2' || textUpper === 'ADICIONAR' || textUpper === 'MAIS') {
+      session.state = STATE.COLLECTING;
+      await chat.sendMessage('Ok, envie mais fotos.');
+      setReminder(number, chat, session);
+      return;
+    }
+  }
+
+  if (session.state === STATE.WAITING_ACTION) {
+    if (textUpper === '1' || textUpper === 'OUTRA' || textUpper === 'NOVA') {
+      session.state = STATE.COLLECTING;
+      session.photos = [];
+      session.legend = null;
+      await chat.sendMessage(`${getGreeting()}! Envie as fotos (min ${config.minPhotosPerBatch}) e a AS.`);
+      return;
+    }
+    if (textUpper === '2' || textUpper === 'FINALIZAR' || textUpper === 'FIM') {
+      clearTimers(number);
+      sessions.delete(number);
+      return;
+    }
+  }
+
+  // Cumprimento
+  if (isGreeting(text) && session.state === STATE.IDLE) {
+    session.state = STATE.COLLECTING;
+    session.photos = [];
+    session.legend = null;
+
+    await chat.sendMessage(
+      `${getGreeting()}! Envie as fotos (minimo ${config.minPhotosPerBatch}) e a AS (formato 202XXXXXXX).`
+    );
+    setReminder(number, chat, session);
     return;
   }
 
-  // Comando ENVIAR - finaliza e faz upload
-  if (text === 'ENVIAR' || text === 'UPLOAD') {
-    await processBatchUpload(number, chat);
+  // Verifica se e uma AS
+  const validation = validateLegend(text);
+  if (validation.valid) {
+    if (session.state === STATE.IDLE) {
+      session.state = STATE.COLLECTING;
+      session.photos = [];
+    }
+
+    if (session.legend && session.legend !== validation.code) {
+      await chat.sendMessage(`AS diferente do lote atual (${session.legend}).`);
+      return;
+    }
+
+    session.legend = validation.code;
+    await chat.sendMessage(`AS ${validation.code} registrada.`);
+
+    // Verifica se pode enviar
+    if (session.photos.length >= config.minPhotosPerBatch) {
+      session.state = STATE.READY_TO_SEND;
+      clearTimers(number);
+
+      await chat.sendMessage(
+        `*Resumo do lote:*\n` +
+        `- Fotos: ${session.photos.length}\n` +
+        `- AS: ${session.legend}`
+      );
+
+      await sendPoll(chat, 'Deseja enviar?', ['Sim, enviar', 'Adicionar mais fotos']);
+      setTimeout5min(number, chat);
+    } else {
+      setReminder(number, chat, session);
+    }
     return;
   }
 
-  // Comando PROXIMO - inicia proximo lote apos envio
-  if (text === 'PROXIMO' || text === 'PRÓXIMO') {
-    await startBatch(number, chat);
+  // Comando CANCELAR
+  if (textUpper === 'CANCELAR') {
+    if (session.state !== STATE.IDLE) {
+      const count = session.photos.length;
+      clearTimers(number);
+      sessions.delete(number);
+      await chat.sendMessage(`Lote cancelado. ${count} foto(s) descartadas.`);
+    } else {
+      await chat.sendMessage('Nenhum lote ativo.');
+    }
     return;
   }
 
-  // Comando STATUS (oculto)
-  if (text === 'STATUS') {
-    await sendStatus(number, chat);
-    return;
-  }
-
-  // Comando CANCELAR (oculto)
-  if (text === 'CANCELAR') {
-    await cancelBatch(number, chat);
+  // Comando STATUS
+  if (textUpper === 'STATUS') {
+    if (session.state === STATE.IDLE) {
+      await chat.sendMessage('Nenhum lote ativo. Envie um oi para comecar.');
+    } else {
+      const remaining = Math.max(0, config.minPhotosPerBatch - session.photos.length);
+      await chat.sendMessage(
+        `*Status:*\n` +
+        `- Fotos: ${session.photos.length}\n` +
+        `- AS: ${session.legend || 'pendente'}\n` +
+        `- Faltam: ${remaining > 0 ? remaining + ' foto(s)' : 'completo'}`
+      );
+    }
     return;
   }
 
   // Comando AJUDA
-  if (text === 'AJUDA' || text === 'HELP') {
-    await sendHelp(chat);
+  if (textUpper === 'AJUDA' || textUpper === 'HELP') {
+    await chat.sendMessage(
+      `*Como usar:*\n` +
+      `1. Envie "Oi" ou "Bom dia"\n` +
+      `2. Envie as fotos (min ${config.minPhotosPerBatch})\n` +
+      `3. Envie a AS (202XXXXXXX)\n` +
+      `4. Confirme o envio\n\n` +
+      `Comandos: STATUS, CANCELAR`
+    );
     return;
   }
 
-  // Se tem lote ativo aguardando legenda, verifica se e uma legenda
-  if (batch && batch.active && batch.waitingLegend) {
-    const validation = await validateLegend(message.body);
-    if (validation.valid) {
-      // Verifica se ja tem legenda diferente
-      if (batch.legend && batch.legend !== validation.code) {
-        await naturalDelay();
-        await chat.sendMessage(
-          `Erro: Legenda diferente!\n` +
-          `Lote atual: ${batch.legend}\n` +
-          `Use apenas uma legenda por lote.`
-        );
-        return;
+  // Se esta coletando e recebeu texto desconhecido
+  if (session.state === STATE.COLLECTING && session.photos.length === 0) {
+    // Assume que quer comecar
+    await chat.sendMessage(
+      `${getGreeting()}! Envie as fotos (minimo ${config.minPhotosPerBatch}) e a AS (formato 202XXXXXXX).`
+    );
+    setReminder(number, chat, session);
+  }
+}
+
+/**
+ * Processa resposta de enquete
+ */
+async function handlePollResponse(message) {
+  try {
+    const contact = await message.getContact();
+    const number = contact.number;
+    const chat = await message.getChat();
+    const session = getSession(number);
+
+    // Verifica qual opcao foi selecionada
+    const selectedOption = message.body?.toLowerCase() || '';
+
+    if (session.state === STATE.READY_TO_SEND) {
+      if (selectedOption.includes('sim') || selectedOption.includes('enviar')) {
+        await doSend(number, chat, session);
+      } else if (selectedOption.includes('adicionar') || selectedOption.includes('mais')) {
+        session.state = STATE.COLLECTING;
+        await chat.sendMessage('Ok, envie mais fotos.');
+        setReminder(number, chat, session);
       }
-      batch.legend = validation.code;
-      batch.waitingLegend = false;
-      batch.lastUpdate = new Date();
-
-      await naturalDelay();
-      await chat.sendMessage(
-        `AS ${validation.code} registrada!\n\n` +
-        `Digite *ENVIAR* para fazer upload.`
-      );
-      return;
     }
-  }
 
-  // Se tem lote ativo sem legenda, pode ser uma legenda sendo enviada
-  if (batch && batch.active && !batch.legend) {
-    const validation = await validateLegend(message.body);
-    if (validation.valid) {
-      batch.legend = validation.code;
-      batch.lastUpdate = new Date();
-
-      await naturalDelay();
-      await chat.sendMessage(
-        `AS ${validation.code} registrada para o lote!`
-      );
-      return;
+    if (session.state === STATE.WAITING_ACTION) {
+      if (selectedOption.includes('outra') || selectedOption.includes('nova')) {
+        session.state = STATE.COLLECTING;
+        session.photos = [];
+        session.legend = null;
+        await chat.sendMessage(`Envie as fotos e a AS.`);
+      } else if (selectedOption.includes('finalizar') || selectedOption.includes('fim')) {
+        clearTimers(number);
+        sessions.delete(number);
+      }
     }
+  } catch (error) {
+    console.error('Erro ao processar poll:', error.message);
   }
 }
 
 /**
- * Inicia novo lote
+ * Executa o envio do lote
  */
-async function startBatch(number, chat) {
-  // Se ja tem lote ativo, cancela
-  if (pendingBatches.has(number)) {
-    const oldBatch = pendingBatches.get(number);
-    if (oldBatch.active && oldBatch.photos.length > 0) {
-      console.log(`Lote anterior cancelado para ${number}: ${oldBatch.photos.length} fotos`);
-    }
-  }
+async function doSend(number, chat, session) {
+  clearTimers(number);
 
-  // Cria novo lote
-  pendingBatches.set(number, {
-    active: true,
-    legend: null,
-    photos: [],
-    waitingLegend: false,
-    lastUpdate: new Date()
-  });
+  await chat.sendMessage(`Salvando ${session.photos.length} fotos...`);
 
-  await naturalDelay();
-  await chat.sendMessage(
-    `Favor envie tres fotos e o numero da AS`
-  );
-}
+  // Salva localmente
+  const result = saveBatch(session.photos, session.collaboratorName, session.legend);
 
-/**
- * Processa upload do lote
- */
-async function processBatchUpload(number, chat) {
-  if (!pendingBatches.has(number) || !pendingBatches.get(number).active) {
-    await naturalDelay();
-    await chat.sendMessage('Nenhum lote ativo. Digite *FOTOS* para iniciar.');
-    return;
-  }
+  if (result.failed === 0) {
+    session.todayCount += session.photos.length;
 
-  const batch = pendingBatches.get(number);
-
-  // Verifica minimo de fotos
-  if (batch.photos.length < config.minPhotosPerBatch) {
-    const remaining = config.minPhotosPerBatch - batch.photos.length;
-    await naturalDelay();
-    await chat.sendMessage(
-      `Lote incompleto! Voce tem ${batch.photos.length} foto(s).\n` +
-      `Envie mais ${remaining} para atingir o minimo de ${config.minPhotosPerBatch}.`
-    );
-    return;
-  }
-
-  // Se nao tem legenda
-  if (!batch.legend) {
-    // Se ja pediu a legenda e usuario mandou ENVIAR de novo, salva sem legenda
-    if (batch.waitingLegend) {
-      await saveBatchWithoutLegend(number, chat, batch);
-      return;
+    // Envia para grupo de supervisores
+    if (config.supervisorGroup) {
+      const supervisorResult = await sendToSupervisors(session);
+      if (!supervisorResult.success) {
+        console.log(`Falha ao enviar para supervisores: ${supervisorResult.reason}`);
+      }
     }
 
-    // Primeira vez sem legenda - pede
-    batch.waitingLegend = true;
-    await naturalDelay();
-    await chat.sendMessage(
-      `Falta o numero da AS!\n` +
-      `Envie a AS no formato 202XXXXXXX ou digite *ENVIAR* novamente para salvar sem AS.`
-    );
-    return;
-  }
+    await chat.sendMessage(`AS ${session.legend} enviada com sucesso!`);
 
-  // Faz upload
-  await doUpload(number, chat, batch);
-}
+    logActivity({
+      type: 'batch_complete',
+      message: `AS ${session.legend} - ${session.collaboratorName}`,
+      photoCount: session.photos.length,
+      collaborator: session.collaboratorName
+    });
 
-/**
- * Executa o upload do lote
- */
-async function doUpload(number, chat, batch) {
-  const destino = isOnedriveConfigured ? 'OneDrive' : 'pasta local';
-  await naturalDelay();
-  await chat.sendMessage(
-    `Enviando ${batch.photos.length} fotos para ${destino}...\n` +
-    `AS: ${batch.legend || 'sem legenda'}`
-  );
+    // Limpa lote atual
+    const photosCopy = [...session.photos]; // Guarda copia antes de limpar
+    session.photos = [];
+    session.legend = null;
+    session.state = STATE.WAITING_ACTION;
 
-  // Faz upload
-  const result = await uploadBatch(batch.photos, batch.legend);
+    // Enquete pos-envio
+    await sendPoll(chat, 'O que deseja fazer?', ['Enviar outra AS', 'Finalizar']);
+    setTimeout5min(number, chat);
 
-  await naturalDelay();
-  if (result.success === result.total) {
-    await chat.sendMessage(
-      `Upload concluido com sucesso!\n` +
-      `${result.success} fotos salvas.\n\n` +
-      `Digite *PROXIMO* para enviar outro lote.`
-    );
   } else {
-    await chat.sendMessage(
-      `Upload parcial:\n` +
-      `- Sucesso: ${result.success}\n` +
-      `- Falhas: ${result.failed}\n\n` +
-      `Verifique a conexao.`
-    );
-  }
-
-  // Registra no relatorio
-  const collaboratorName = getCollaboratorName(number);
-  logActivity({
-    type: 'batch_complete',
-    message: `Lote ${batch.legend || 'SEM_AS'} de ${collaboratorName || number}`,
-    photoCount: batch.photos.length,
-    success: result.success,
-    failed: result.failed
-  });
-
-  // Limpa lote
-  pendingBatches.delete(number);
-  clearTemp();
-}
-
-/**
- * Salva lote sem legenda
- */
-async function saveBatchWithoutLegend(number, chat, batch) {
-  const now = new Date();
-  const dateStr = now.toISOString().split('T')[0];
-  const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, 'h').slice(0, 5);
-  const collaboratorName = getCollaboratorName(number);
-
-  // Pasta: SEM_LEGENDA/2024-01-15_14h30_5511999999999/
-  const folderName = `${dateStr}_${timeStr}_${number}`;
-
-  const destino = isOnedriveConfigured ? 'OneDrive' : 'pasta local';
-  await naturalDelay();
-  await chat.sendMessage(
-    `Salvando ${batch.photos.length} fotos SEM AS em ${destino}...\n` +
-    `Pasta: SEM_LEGENDA/${folderName}`
-  );
-
-  // Faz upload para pasta SEM_LEGENDA
-  const result = await uploadBatch(batch.photos, `SEM_LEGENDA/${folderName}`);
-
-  await naturalDelay();
-  if (result.success === result.total) {
-    await chat.sendMessage(
-      `Fotos salvas com sucesso!\n` +
-      `${result.success} fotos em SEM_LEGENDA/${folderName}\n\n` +
-      `Digite *PROXIMO* para enviar outro lote.`
-    );
-  } else {
-    await chat.sendMessage(
-      `Upload parcial:\n` +
-      `- Sucesso: ${result.success}\n` +
-      `- Falhas: ${result.failed}`
-    );
-  }
-
-  // Registra no relatorio como sem legenda
-  logActivity({
-    type: 'batch_no_legend',
-    message: `Lote SEM AS de ${collaboratorName || number}`,
-    photoCount: batch.photos.length,
-    folder: folderName,
-    success: result.success,
-    failed: result.failed
-  });
-
-  // Limpa lote
-  pendingBatches.delete(number);
-  clearTemp();
-}
-
-/**
- * Envia status do lote atual
- */
-async function sendStatus(number, chat) {
-  await naturalDelay();
-  if (!pendingBatches.has(number) || !pendingBatches.get(number).active) {
-    await chat.sendMessage('Nenhum lote ativo.');
-    return;
-  }
-
-  const batch = pendingBatches.get(number);
-  const remaining = Math.max(0, config.minPhotosPerBatch - batch.photos.length);
-
-  await chat.sendMessage(
-    `Status do Lote:\n` +
-    `- AS: ${batch.legend || 'nao informada'}\n` +
-    `- Fotos: ${batch.photos.length}\n` +
-    `- Faltam: ${remaining > 0 ? remaining : 'Lote completo!'}`
-  );
-}
-
-/**
- * Cancela lote atual
- */
-async function cancelBatch(number, chat) {
-  await naturalDelay();
-  if (pendingBatches.has(number) && pendingBatches.get(number).active) {
-    const batch = pendingBatches.get(number);
-    pendingBatches.delete(number);
-    await chat.sendMessage(
-      `Lote com ${batch.photos.length} foto(s) cancelado.`
-    );
-  } else {
-    await chat.sendMessage('Nenhum lote para cancelar.');
+    await chat.sendMessage(`Erro ao salvar: ${result.failed} falha(s). Tente novamente.`);
+    session.state = STATE.READY_TO_SEND;
   }
 }
 
-/**
- * Envia mensagem de ajuda
- */
-async function sendHelp(chat) {
-  await naturalDelay();
-  await chat.sendMessage(
-    `*Bot WhatsApp - Ajuda*\n\n` +
-    `*Como usar:*\n` +
-    `1. Digite *FOTOS* para iniciar\n` +
-    `2. Envie as fotos (minimo ${config.minPhotosPerBatch})\n` +
-    `3. Inclua a AS em uma das fotos ou envie separado\n` +
-    `4. Digite *ENVIAR* para finalizar\n` +
-    `5. Digite *PROXIMO* para outro lote\n\n` +
-    `*Formato da AS:* 202XXXXXXX (10 digitos)`
-  );
-}
-
-/**
- * Limpa lotes antigos
- */
-function cleanOldBatches() {
-  const now = new Date();
-
-  for (const [number, batch] of pendingBatches.entries()) {
-    const elapsed = now - batch.lastUpdate;
-    if (elapsed > BATCH_TIMEOUT) {
-      console.log(`Lote expirado removido: ${number} (${batch.photos.length} fotos)`);
-      pendingBatches.delete(number);
-    }
-  }
-}
-
-/**
- * Retorna cliente para uso externo
- */
 function getClient() {
   return client;
 }
