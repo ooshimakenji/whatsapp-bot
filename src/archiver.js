@@ -5,10 +5,9 @@ import { CONFIG } from './config.js';
 import { initAlerts, stopAlerts, addAlert } from './alerts.js';
 import {
   saveTextMessage,
-  saveMedia,
-  saveBufferedMedia,
-  saveBufferedMediaNoLabel,
+  saveBufferedBlock,
   extractProtocolo,
+  extractAllProtocolos,
   sanitizarNomeGrupo,
 } from './storage.js';
 
@@ -170,12 +169,14 @@ async function handleTextMessage(msg, groupName, author, chatId, timestamp) {
     const pending = pendingBuffer.get(bufferKey);
 
     if (pending && pending.items.length > 0) {
-      // Limpa timer
+      // Reseta timer — texto com protocolo faz parte do bloco
       if (pending.timer) clearTimeout(pending.timer);
-      pendingBuffer.delete(bufferKey);
+      pending.protocolos.add(protocolo);
 
-      console.log(`  [${groupName}] ${author}: protocolo ${protocolo} associado a ${pending.items.length} mídia(s) do buffer`);
-      await saveBufferedMedia(groupName, author, pending.items, protocolo, timestamp);
+      console.log(`  [${groupName}] ${author}: protocolo ${protocolo} adicionado ao bloco (${pending.items.length} mídia(s))`);
+
+      // Reinicia timer para aguardar mais mensagens do bloco
+      pending.timer = setTimeout(() => flushBuffer(bufferKey), CONFIG.bufferTimeoutMs);
       return;
     }
   }
@@ -209,62 +210,71 @@ async function handleMediaMessage(msg, groupName, author, chatId, timestamp) {
   }
 
   const caption = msg.body || '';
-  const protocolo = extractProtocolo(caption);
+  const protocolosCaption = extractAllProtocolos(caption);
 
-  if (protocolo) {
-    // Tem protocolo na caption — salva direto
-    console.log(`  [${groupName}] ${author}: mídia com protocolo ${protocolo}`);
-    await saveMedia(groupName, author, media.data, media.mimetype, caption, timestamp);
-  } else {
-    // Sem protocolo na caption — vai pro buffer
-    const bufferKey = `${chatId}:${msg.author || author}`;
-    let pending = pendingBuffer.get(bufferKey);
+  // Toda mídia vai pro buffer do autor (com ou sem legenda)
+  const bufferKey = `${chatId}:${msg.author || author}`;
+  let pending = pendingBuffer.get(bufferKey);
 
-    if (!pending) {
-      pending = {
-        items: [],
-        timer: null,
-        groupName,
-        authorName: author,
-      };
-      pendingBuffer.set(bufferKey, pending);
-    }
-
-    // Reseta timer a cada nova mídia
-    if (pending.timer) clearTimeout(pending.timer);
-
-    pending.items.push({
-      mediaData: media.data,
-      mimetype: media.mimetype,
-      caption,
-      timestamp,
-    });
-
-    console.log(`  [${groupName}] ${author}: mídia sem legenda → buffer (${pending.items.length} item(s), aguardando ${CONFIG.bufferTimeoutMs / 1000}s)`);
-
-    // Timer de timeout
-    pending.timer = setTimeout(async () => {
-      const p = pendingBuffer.get(bufferKey);
-      if (p && p.items.length > 0) {
-        pendingBuffer.delete(bufferKey);
-        console.log(`  [${groupName}] ${author}: timeout do buffer → sem_legenda/`);
-        await saveBufferedMediaNoLabel(groupName, author, p.items);
-      }
-    }, CONFIG.bufferTimeoutMs);
+  if (!pending) {
+    pending = {
+      items: [],
+      protocolos: new Set(),
+      timer: null,
+      groupName,
+      authorName: author,
+    };
+    pendingBuffer.set(bufferKey, pending);
   }
+
+  // Reseta timer a cada nova mensagem
+  if (pending.timer) clearTimeout(pending.timer);
+
+  // Adiciona protocolos da caption ao bloco
+  for (const proto of protocolosCaption) {
+    pending.protocolos.add(proto);
+  }
+
+  pending.items.push({
+    mediaData: media.data,
+    mimetype: media.mimetype,
+    caption,
+    timestamp,
+  });
+
+  const protoInfo = protocolosCaption.length > 0
+    ? `com protocolo ${protocolosCaption.join(', ')}`
+    : 'sem legenda';
+  console.log(`  [${groupName}] ${author}: mídia ${protoInfo} → buffer (${pending.items.length} item(s), aguardando ${CONFIG.bufferTimeoutMs / 1000}s)`);
+
+  // Timer de timeout — quando o autor para de enviar, processa o bloco
+  pending.timer = setTimeout(() => flushBuffer(bufferKey), CONFIG.bufferTimeoutMs);
 }
 
 // ============================================
-// FLUSH BUFFERS (shutdown)
+// FLUSH BUFFER (processa bloco do autor)
+// ============================================
+
+async function flushBuffer(bufferKey) {
+  const pending = pendingBuffer.get(bufferKey);
+  if (!pending || pending.items.length === 0) return;
+
+  if (pending.timer) clearTimeout(pending.timer);
+  pendingBuffer.delete(bufferKey);
+
+  const protocolos = [...pending.protocolos];
+  console.log(`  [${pending.groupName}] ${pending.authorName}: processando bloco — ${pending.items.length} mídia(s), ${protocolos.length} protocolo(s)${protocolos.length > 0 ? ` (${protocolos.join(', ')})` : ''}`);
+
+  await saveBufferedBlock(pending.groupName, pending.authorName, pending.items, protocolos);
+}
+
+// ============================================
+// FLUSH ALL BUFFERS (shutdown)
 // ============================================
 
 async function flushAllBuffers() {
-  for (const [key, pending] of pendingBuffer.entries()) {
-    if (pending.timer) clearTimeout(pending.timer);
-    if (pending.items.length > 0) {
-      console.log(`  Salvando ${pending.items.length} mídia(s) pendentes de ${pending.authorName}...`);
-      await saveBufferedMediaNoLabel(pending.groupName, pending.authorName, pending.items);
-    }
+  for (const key of pendingBuffer.keys()) {
+    await flushBuffer(key);
   }
   pendingBuffer.clear();
 }

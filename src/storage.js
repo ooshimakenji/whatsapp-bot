@@ -103,79 +103,46 @@ export function saveTextMessage(groupName, author, text, timestamp) {
 // SALVAR MÍDIA
 // ============================================
 
-export async function saveMedia(groupName, author, mediaData, mimetype, caption, timestamp) {
-  const protocolos = extractAllProtocolos(caption);
+// Processa bloco inteiro do autor (todas as mídias acumuladas no buffer)
+// Lógica igual ao organizer offline: analisa todos os protocolos do bloco
+export async function saveBufferedBlock(groupName, author, bufferedItems, protocolos) {
   const groupDir = sanitizarNomeGrupo(groupName);
   const autorSanitizado = sanitizarNomeAutor(author);
-  const ts = formatarTimestamp(timestamp);
-  const ext = mimeToExt(mimetype);
+
+  // Filtra protocolos válidos e inválidos
+  const protocolosValidos = protocolos.filter(p => isProtocoloValido(p));
+  const protocolosInvalidos = protocolos.filter(p => !isProtocoloValido(p));
 
   let pastaDestino;
   let alertType = null;
   let alertMsg = null;
 
-  if (protocolos.length === 1) {
-    const proto = protocolos[0];
-    if (isProtocoloValido(proto)) {
-      // Protocolo válido 2025/2026
-      pastaDestino = path.join(CONFIG.archiveDir, groupDir, proto);
-    } else {
-      // Protocolo fora do padrão
-      pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'protocolo_revisar', proto);
-      alertType = 'protocolo_revisar';
-      alertMsg = `Protocolo "${proto}" fora do padrão 2025/2026 - ${author} em ${groupName}`;
-    }
-  } else if (protocolos.length > 1) {
-    // Múltiplas legendas
-    const nomePasta = protocolos.join('_');
+  if (protocolosValidos.length === 1) {
+    // Um protocolo válido — caso ideal, tudo vai junto
+    pastaDestino = path.join(CONFIG.archiveDir, groupDir, protocolosValidos[0]);
+  } else if (protocolosValidos.length > 1) {
+    // Múltiplos protocolos válidos — sem_legenda/{autor}/{proto1_proto2}/
+    const nomePasta = protocolosValidos.join('_');
     pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'sem_legenda', autorSanitizado, nomePasta);
 
     // Cria subpastas para cada protocolo
-    for (const proto of protocolos) {
+    for (const proto of protocolosValidos) {
       ensureDir(path.join(pastaDestino, proto));
     }
 
     alertType = 'multiplas_legendas';
-    alertMsg = `Múltiplas legendas (${protocolos.join(', ')}) - ${author} em ${groupName}`;
-  } else {
-    // Sem legenda
-    pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'sem_legenda', autorSanitizado);
-  }
-
-  ensureDir(pastaDestino);
-  const seq = getNextSeq(pastaDestino);
-  const fileName = `${ts}_${autorSanitizado}_${seq}.${ext}`;
-  const filePath = path.join(pastaDestino, fileName);
-
-  // Salva arquivo
-  const buffer = Buffer.from(mediaData, 'base64');
-  fs.writeFileSync(filePath, buffer);
-
-  // Também loga a mídia no JSONL do dia
-  saveTextMessage(groupName, author, `[mídia: ${fileName}]${caption ? ' ' + caption : ''}`, timestamp);
-
-  if (alertType) {
-    await addAlert(alertType, alertMsg);
-  }
-
-  return { filePath, pastaDestino, protocolos };
-}
-
-// Salva mídia pendente do buffer quando chega o protocolo
-export async function saveBufferedMedia(groupName, author, bufferedItems, protocolo, timestamp) {
-  const groupDir = sanitizarNomeGrupo(groupName);
-  const autorSanitizado = sanitizarNomeAutor(author);
-
-  let pastaDestino;
-  let alertType = null;
-  let alertMsg = null;
-
-  if (isProtocoloValido(protocolo)) {
-    pastaDestino = path.join(CONFIG.archiveDir, groupDir, protocolo);
-  } else {
-    pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'protocolo_revisar', protocolo);
+    alertMsg = `Múltiplas legendas (${protocolosValidos.join(', ')}) - ${author} em ${groupName}`;
+  } else if (protocolosInvalidos.length > 0) {
+    // Só protocolos inválidos
+    const nomePasta = protocolosInvalidos.join('_');
+    pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'protocolo_revisar', nomePasta);
     alertType = 'protocolo_revisar';
-    alertMsg = `Protocolo "${protocolo}" fora do padrão 2025/2026 - ${author} em ${groupName}`;
+    alertMsg = `Protocolo(s) "${protocolosInvalidos.join(', ')}" fora do padrão 2025/2026 - ${author} em ${groupName}`;
+  } else {
+    // Sem protocolo nenhum
+    pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'sem_legenda', autorSanitizado);
+    alertType = 'buffer_timeout';
+    alertMsg = `${bufferedItems.length} mídia(s) sem legenda de ${author} em ${groupName} → sem_legenda/`;
   }
 
   ensureDir(pastaDestino);
@@ -189,33 +156,14 @@ export async function saveBufferedMedia(groupName, author, bufferedItems, protoc
 
     const buffer = Buffer.from(item.mediaData, 'base64');
     fs.writeFileSync(filePath, buffer);
+
+    // Loga no JSONL do dia
+    saveTextMessage(groupName, author, `[mídia: ${fileName}]${item.caption ? ' ' + item.caption : ''}`, item.timestamp);
   }
 
   if (alertType) {
     await addAlert(alertType, alertMsg);
   }
-}
-
-// Salva mídia do buffer quando dá timeout (sem legenda)
-export async function saveBufferedMediaNoLabel(groupName, author, bufferedItems) {
-  const groupDir = sanitizarNomeGrupo(groupName);
-  const autorSanitizado = sanitizarNomeAutor(author);
-  const pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'sem_legenda', autorSanitizado);
-
-  ensureDir(pastaDestino);
-
-  for (const item of bufferedItems) {
-    const ts = formatarTimestamp(item.timestamp);
-    const ext = mimeToExt(item.mimetype);
-    const seq = getNextSeq(pastaDestino);
-    const fileName = `${ts}_${autorSanitizado}_${seq}.${ext}`;
-    const filePath = path.join(pastaDestino, fileName);
-
-    const buffer = Buffer.from(item.mediaData, 'base64');
-    fs.writeFileSync(filePath, buffer);
-  }
-
-  await addAlert('buffer_timeout', `${bufferedItems.length} mídia(s) sem legenda de ${author} em ${groupName} → sem_legenda/`);
 }
 
 // ============================================
