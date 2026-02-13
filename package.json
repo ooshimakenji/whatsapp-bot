@@ -1,0 +1,16 @@
+{
+  "name": "whatsapp-archiver",
+  "version": "1.0.0",
+  "description": "Bot passivo para arquivar mensagens de grupos WhatsApp",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "puppeteer": "^24.36.1",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}
