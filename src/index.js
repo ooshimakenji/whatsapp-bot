@@ -18,7 +18,7 @@ function checkConfig() {
 async function main() {
   console.log('');
   console.log('  ╔══════════════════════════════════════╗');
-  console.log('  ║       WhatsApp Group Archiver        ║');
+  console.log('  ║           WhatsApp Bila Organizer              ║');
   console.log('  ║         Modo: 100% Passivo           ║');
   console.log('  ╚══════════════════════════════════════╝');
   console.log('');

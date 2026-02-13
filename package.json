@@ -1,5 +1,5 @@
 {
-  "name": "whatsapp-archiver",
+  "name": "whatsapp-bila-organizer",
   "version": "1.0.0",
   "description": "Bot passivo para arquivar mensagens de grupos WhatsApp",
   "main": "src/index.js",

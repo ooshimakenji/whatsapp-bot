@@ -92,7 +92,7 @@ export async function startArchiver() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  console.log('  Iniciando WhatsApp Archiver...\n');
+  console.log('  Iniciando WhatsApp Bila Organizer...\n');
   await client.initialize();
 }
 

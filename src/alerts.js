@@ -61,7 +61,7 @@ export async function addAlert(tipo, mensagem) {
   // WhatsApp DM
   if (client && alertNumberJid) {
     try {
-      await client.sendMessage(alertNumberJid, `[Archiver] ${alertText}`);
+      await client.sendMessage(alertNumberJid, `[Bila] ${alertText}`);
     } catch (err) {
       console.error('  Erro ao enviar alerta DM:', err.message);
     }
@@ -184,7 +184,7 @@ async function generateDailyReport() {
 
   const content = `
 ==========================================
-RELATÓRIO DIÁRIO - WhatsApp Archiver
+RELATÓRIO DIÁRIO - WhatsApp Bila Organizer
 ==========================================
 Data: ${hoje}
 Gerado em: ${new Date().toLocaleString('pt-BR')}
