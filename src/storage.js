@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { CONFIG } from './config.js';
-import { addAlert } from './alerts.js';
+import { addAlert, registrarContagem } from './alerts.js';
 
 // Contador sequencial por pasta (para naming)
 const seqCounters = new Map();
@@ -147,6 +147,9 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
 
   ensureDir(pastaDestino);
 
+  let salvos = 0;
+  let erros = 0;
+
   for (const item of bufferedItems) {
     const ts = formatarTimestamp(item.timestamp);
     const ext = mimeToExt(item.mimetype);
@@ -154,11 +157,29 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
     const fileName = `${ts}_${autorSanitizado}_${seq}.${ext}`;
     const filePath = path.join(pastaDestino, fileName);
 
-    const buffer = Buffer.from(item.mediaData, 'base64');
-    fs.writeFileSync(filePath, buffer);
+    try {
+      const buffer = Buffer.from(item.mediaData, 'base64');
+      fs.writeFileSync(filePath, buffer);
+      salvos++;
 
-    // Loga no JSONL do dia
-    saveTextMessage(groupName, author, `[mídia: ${fileName}]${item.caption ? ' ' + item.caption : ''}`, item.timestamp);
+      // Loga no JSONL do dia
+      saveTextMessage(groupName, author, `[mídia: ${fileName}]${item.caption ? ' ' + item.caption : ''}`, item.timestamp);
+    } catch (err) {
+      erros++;
+      await addAlert('erro_salvar', `Erro ao salvar ${fileName} de ${author} em ${groupName}: ${err.message}`);
+    }
+  }
+
+  // Alerta de sucesso
+  const protoInfo = protocolosValidos.length > 0 ? ` → ${protocolosValidos.join(', ')}` : '';
+  if (salvos > 0) {
+    await addAlert('salvo_sucesso', `${salvos} mídia(s) de ${author} salva(s) em ${groupName}${protoInfo}`);
+  }
+
+  // Registra contagem diária
+  registrarContagem(author, groupName, protocolos, salvos, false);
+  if (erros > 0) {
+    registrarContagem(author, groupName, [], erros, true);
   }
 
   if (alertType) {

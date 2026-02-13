@@ -10,12 +10,17 @@ let alertNumberJid = null;
 let diskCheckInterval = null;
 let dailyReportTimeout = null;
 
+// Contagem diária por autor: { "autor|grupo": { protocolos: Map<proto, qtdMidias>, erros: number } }
+const contagemDiaria = new Map();
+
 const ICONS = {
   protocolo_revisar: '🔢',
   multiplas_legendas: '📂',
   grupo_nao_encontrado: '❌',
   disco_cheio: '💾',
   erro: '⚠️',
+  erro_salvar: '❌',
+  salvo_sucesso: '✅',
   info: '📋',
   buffer_timeout: '⏱️',
 };
@@ -59,6 +64,27 @@ export async function addAlert(tipo, mensagem) {
       await client.sendMessage(alertNumberJid, `[Archiver] ${alertText}`);
     } catch (err) {
       console.error('  Erro ao enviar alerta DM:', err.message);
+    }
+  }
+}
+
+// Registra contagem de mídias/protocolos por autor
+export function registrarContagem(author, groupName, protocolos, qtdMidias, erro = false) {
+  const key = `${author}|${groupName}`;
+  let entry = contagemDiaria.get(key);
+  if (!entry) {
+    entry = { protocolos: new Map(), erros: 0 };
+    contagemDiaria.set(key, entry);
+  }
+  if (erro) {
+    entry.erros += qtdMidias;
+  } else {
+    for (const p of protocolos) {
+      entry.protocolos.set(p, (entry.protocolos.get(p) || 0) + qtdMidias);
+    }
+    // Sem protocolo — conta como "sem_legenda"
+    if (protocolos.length === 0) {
+      entry.protocolos.set('sem_legenda', (entry.protocolos.get('sem_legenda') || 0) + qtdMidias);
     }
   }
 }
@@ -110,12 +136,75 @@ async function generateDailyReport() {
     fs.mkdirSync(logsDir, { recursive: true });
   }
 
+  // Monta resumo de contagem por autor
+  let contagemTexto = '';
+  let contagemDM = '';
+  let poucasFotosTexto = '';
+  let totalMidias = 0;
+  let totalProtocolos = new Set();
+  let totalErros = 0;
+  const poucasFotos = []; // AS com menos de 3 mídias
+
+  if (contagemDiaria.size > 0) {
+    const linhas = [];
+    for (const [key, entry] of contagemDiaria) {
+      const [autor, grupo] = key.split('|');
+      let midiasAutor = 0;
+      let asCount = 0;
+
+      for (const [proto, qtd] of entry.protocolos) {
+        midiasAutor += qtd;
+        if (proto !== 'sem_legenda') {
+          asCount++;
+          totalProtocolos.add(proto);
+          if (qtd < 3) {
+            poucasFotos.push({ proto, autor, grupo, qtd });
+          }
+        }
+      }
+
+      totalMidias += midiasAutor;
+      totalErros += entry.erros;
+      linhas.push(`  - ${autor} (${grupo}): ${midiasAutor} mídia(s), ${asCount} AS(s)${entry.erros > 0 ? `, ${entry.erros} erro(s)` : ''}`);
+    }
+    contagemTexto = linhas.join('\n');
+    contagemDM = linhas.join('\n');
+  } else {
+    contagemTexto = '  Nenhuma mídia processada.';
+    contagemDM = 'Nenhuma mídia processada.';
+  }
+
+  if (poucasFotos.length > 0) {
+    poucasFotosTexto = poucasFotos
+      .map(p => `  - AS ${p.proto}: ${p.qtd} mídia(s) - ${p.autor} (${p.grupo})`)
+      .join('\n');
+  } else {
+    poucasFotosTexto = '  Nenhuma.';
+  }
+
   const content = `
 ==========================================
 RELATÓRIO DIÁRIO - WhatsApp Archiver
 ==========================================
 Data: ${hoje}
 Gerado em: ${new Date().toLocaleString('pt-BR')}
+
+==========================================
+RESUMO
+==========================================
+Total de mídias salvas: ${totalMidias}
+Total de AS (protocolos): ${totalProtocolos.size}
+Total de erros: ${totalErros}
+
+==========================================
+CONTAGEM POR ENCANADOR
+==========================================
+${contagemTexto}
+
+==========================================
+AS COM MENOS DE 3 FOTOS/VÍDEOS (${poucasFotos.length})
+==========================================
+${poucasFotosTexto}
 
 ==========================================
 ALERTAS DO DIA (${alertasDoDia.length})
@@ -130,17 +219,23 @@ ${alertasDoDia.length > 0 ? alertasDoDia.join('\n') : 'Nenhum alerta.'}
   console.log(`\n  Relatório diário salvo: ${logPath}`);
 
   // Envia resumo por DM
-  if (client && alertNumberJid && alertasDoDia.length > 0) {
+  if (client && alertNumberJid) {
     try {
-      await client.sendMessage(
-        alertNumberJid,
-        `[Archiver] Relatório ${hoje}: ${alertasDoDia.length} alerta(s). Salvo em ${logPath}`
-      );
+      const poucasFotosDM = poucasFotos.length > 0
+        ? `\n\n⚠️ *AS com menos de 3 fotos/vídeos (${poucasFotos.length}):*\n${poucasFotos.map(p => `  - AS ${p.proto}: ${p.qtd} mídia(s) - ${p.autor}`).join('\n')}`
+        : '';
+      const dmText = `📊 *Relatório ${hoje}*\n\n` +
+        `*Resumo:* ${totalMidias} mídia(s), ${totalProtocolos.size} AS(s)${totalErros > 0 ? `, ${totalErros} erro(s)` : ''}\n\n` +
+        `*Por encanador:*\n${contagemDM}` +
+        poucasFotosDM +
+        `\n\n${alertasDoDia.length > 0 ? `*Alertas:* ${alertasDoDia.length}` : 'Sem alertas.'}`;
+      await client.sendMessage(alertNumberJid, dmText);
     } catch {
       // best-effort
     }
   }
 
-  // Reseta alertas para próximo dia
+  // Reseta alertas e contagem para próximo dia
   alertasDoDia = [];
+  contagemDiaria.clear();
 }
