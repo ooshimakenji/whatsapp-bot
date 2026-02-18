@@ -50,6 +50,36 @@ archive/
     └── {YYYY-MM-DD}_relatorio.txt
 ```
 
+## Resiliência / Auto-start
+- **Botão power do notebook** configurado para "não fazer nada" (evita desligamento acidental)
+  - Revertir: Configurações > Sistema > Energia > "Botão de energia"
+- **Auto-start no login do Windows** via atalho na pasta Startup
+  - Atalho: `%AppData%\Microsoft\Windows\Start Menu\Programs\Startup\WhatsAppArchiver.lnk`
+  - Executa `start-bot.bat` (janela minimizada)
+  - Para desativar: deletar o atalho acima
+- `start-bot.bat` — script que faz `cd` no projeto e roda `npm start`
+
+## PM2
+- `pm2 start ecosystem.config.cjs` — inicia o bot
+- `pm2 logs whatsapp-bila-organizer --raw` — logs sem prefixo (necessário pra escanear QR code)
+- `pm2 kill` — mata o daemon PM2 e todos os processos (usar quando Chrome zumbi travar)
+- Se precisar escanear QR code novo: `pm2 kill`, limpar `session/`, iniciar PM2, usar `--raw` pra ver QR
+- `ecosystem.config.cjs` — config do PM2
+
+## Catch-up de Mensagens
+- No startup, busca as últimas 50 mensagens de cada grupo monitorado
+- Processa apenas mensagens da última 1 hora (`CATCHUP_WINDOW_MS`)
+- Evita perder mensagens enviadas enquanto o bot estava offline/reiniciando
+
+## Health Check / Auto-Recovery
+- **Health check a cada 5 min** via `client.getState()` no `archiver.js`
+- Se 3 falhas consecutivas → limpa sessão corrompida, mata o processo, PM2 reinicia
+- **Contador de crashes** no `index.js` via arquivo `.restart_count`
+  - Se o bot crashar 3x seguidas no `initialize()` → limpa a pasta `session/` automaticamente
+  - Quando conecta com sucesso → reseta o contador
+- Após limpar sessão, um novo QR code será gerado (precisa escanear pelo celular)
+- Alertas de health check são enviados via DM no WhatsApp (se ainda conectado)
+
 ## Comandos
 - `npm start` — inicia o bot
 - `npm install` — instala dependências

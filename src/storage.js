@@ -103,9 +103,63 @@ export function saveTextMessage(groupName, author, text, timestamp) {
 // SALVAR MÍDIA
 // ============================================
 
+// ============================================
+// BUFFER TEMPORÁRIO EM DISCO (crash recovery)
+// ============================================
+
+function sanitizeBufferKey(bufferKey) {
+  return bufferKey.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+export function saveTempMedia(bufferKey, seqNumber, mediaData, mimetype) {
+  const ext = mimeToExt(mimetype);
+  const tempDir = path.join(CONFIG.bufferTempDir, sanitizeBufferKey(bufferKey));
+  ensureDir(tempDir);
+  const filePath = path.join(tempDir, `${String(seqNumber).padStart(3, '0')}.${ext}`);
+  fs.writeFileSync(filePath, Buffer.from(mediaData, 'base64'));
+  return filePath;
+}
+
+export function saveTempMeta(bufferKey, meta) {
+  const tempDir = path.join(CONFIG.bufferTempDir, sanitizeBufferKey(bufferKey));
+  ensureDir(tempDir);
+  fs.writeFileSync(path.join(tempDir, 'meta.json'), JSON.stringify(meta));
+}
+
+export function loadPersistentBuffers() {
+  if (!fs.existsSync(CONFIG.bufferTempDir)) return [];
+  const results = [];
+  let folders;
+  try { folders = fs.readdirSync(CONFIG.bufferTempDir); } catch { return []; }
+  for (const folder of folders) {
+    const folderPath = path.join(CONFIG.bufferTempDir, folder);
+    const metaPath = path.join(folderPath, 'meta.json');
+    if (!fs.existsSync(metaPath)) continue;
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+      if (meta.bufferKey && meta.groupName && meta.authorName && Array.isArray(meta.items)) {
+        results.push({ folderPath, meta });
+      }
+    } catch { /* pula corrompidos */ }
+  }
+  return results;
+}
+
+function cleanTempDir(bufferKey) {
+  if (!bufferKey) return;
+  const tempDir = path.join(CONFIG.bufferTempDir, sanitizeBufferKey(bufferKey));
+  try {
+    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+  } catch { /* best effort */ }
+}
+
+// ============================================
+// SALVAR MÍDIA
+// ============================================
+
 // Processa bloco inteiro do autor (todas as mídias acumuladas no buffer)
 // Lógica igual ao organizer offline: analisa todos os protocolos do bloco
-export async function saveBufferedBlock(groupName, author, bufferedItems, protocolos) {
+export async function saveBufferedBlock(groupName, author, bufferedItems, protocolos, bufferKey = null) {
   const groupDir = sanitizarNomeGrupo(groupName);
   const autorSanitizado = sanitizarNomeAutor(author);
 
@@ -158,8 +212,13 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
     const filePath = path.join(pastaDestino, fileName);
 
     try {
-      const buffer = Buffer.from(item.mediaData, 'base64');
-      fs.writeFileSync(filePath, buffer);
+      if (item.filePath && fs.existsSync(item.filePath)) {
+        fs.copyFileSync(item.filePath, filePath);
+      } else if (item.mediaData) {
+        fs.writeFileSync(filePath, Buffer.from(item.mediaData, 'base64'));
+      } else {
+        throw new Error('Sem dados de mídia disponíveis');
+      }
       salvos++;
 
       // Loga no JSONL do dia
@@ -185,6 +244,9 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
   if (alertType) {
     await addAlert(alertType, alertMsg);
   }
+
+  // Limpa pasta temp após mover os arquivos
+  cleanTempDir(bufferKey);
 }
 
 // ============================================

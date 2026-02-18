@@ -6,12 +6,15 @@ import { CONFIG } from './config.js';
 // Alertas acumulados no dia
 let alertasDoDia = [];
 let client = null;
-let alertNumberJid = null;
+let alertChatJid = null;
 let diskCheckInterval = null;
 let dailyReportTimeout = null;
 
 // Contagem diária por autor: { "autor|grupo": { protocolos: Map<proto, qtdMidias>, erros: number } }
 const contagemDiaria = new Map();
+
+// Tipos que ficam só no console — não enviam mensagem no WhatsApp (reduz ruído no LOGS_BOT)
+const CONSOLE_ONLY_TYPES = new Set([]);
 
 const ICONS = {
   protocolo_revisar: '🔢',
@@ -25,13 +28,37 @@ const ICONS = {
   buffer_timeout: '⏱️',
 };
 
-export function initAlerts(whatsappClient) {
+export async function initAlerts(whatsappClient) {
   client = whatsappClient;
 
-  // Detecta número para DM
-  const alertNum = CONFIG.alertNumber || client.info?.wid?.user;
-  if (alertNum) {
-    alertNumberJid = `${alertNum}@c.us`;
+  // Busca grupo de alertas por nome (ALERT_GROUP), ou cai no DM próprio como fallback
+  try {
+    const chats = await client.getChats();
+    if (CONFIG.alertGroup) {
+      const groupChat = chats.find(c => c.isGroup && c.name === CONFIG.alertGroup);
+      if (groupChat) {
+        alertChatJid = groupChat.id._serialized;
+        console.log(`  Alertas configurados para o grupo: ${CONFIG.alertGroup}`);
+      } else {
+        console.warn(`  Grupo de alertas "${CONFIG.alertGroup}" não encontrado — alertas desativados.`);
+      }
+    } else {
+      // Fallback: DM para si mesmo
+      const myNumber = CONFIG.alertNumber || client.info?.wid?.user;
+      if (myNumber) {
+        const myJid = `${myNumber}@c.us`;
+        const selfChat = chats.find(c => c.id._serialized === myJid || c.id.user === myNumber);
+        if (selfChat) {
+          alertChatJid = selfChat.id._serialized;
+        } else {
+          const numberId = await client.getNumberId(myNumber);
+          alertChatJid = numberId?._serialized || myJid;
+        }
+        console.log(`  Alertas DM configurados para: ${alertChatJid}`);
+      }
+    }
+  } catch (err) {
+    console.error('  Erro ao configurar alertas:', err.message);
   }
 
   // Verifica disco a cada 30 minutos
@@ -58,12 +85,12 @@ export async function addAlert(tipo, mensagem) {
   // Acumula para relatório
   alertasDoDia.push(alertText);
 
-  // WhatsApp DM
-  if (client && alertNumberJid) {
+  // WhatsApp grupo/DM — exceto tipos console-only
+  if (client && alertChatJid && !CONSOLE_ONLY_TYPES.has(tipo)) {
     try {
-      await client.sendMessage(alertNumberJid, `[Bila] ${alertText}`);
+      await client.sendMessage(alertChatJid, `[Bila] ${alertText}`);
     } catch (err) {
-      console.error('  Erro ao enviar alerta DM:', err.message);
+      console.error('  Erro ao enviar alerta:', err.message);
     }
   }
 }
@@ -219,7 +246,7 @@ ${alertasDoDia.length > 0 ? alertasDoDia.join('\n') : 'Nenhum alerta.'}
   console.log(`\n  Relatório diário salvo: ${logPath}`);
 
   // Envia resumo por DM
-  if (client && alertNumberJid) {
+  if (client && alertChatJid) {
     try {
       const poucasFotosDM = poucasFotos.length > 0
         ? `\n\n⚠️ *AS com menos de 3 fotos/vídeos (${poucasFotos.length}):*\n${poucasFotos.map(p => `  - AS ${p.proto}: ${p.qtd} mídia(s) - ${p.autor}`).join('\n')}`
@@ -229,7 +256,7 @@ ${alertasDoDia.length > 0 ? alertasDoDia.join('\n') : 'Nenhum alerta.'}
         `*Por encanador:*\n${contagemDM}` +
         poucasFotosDM +
         `\n\n${alertasDoDia.length > 0 ? `*Alertas:* ${alertasDoDia.length}` : 'Sem alertas.'}`;
-      await client.sendMessage(alertNumberJid, dmText);
+      await client.sendMessage(alertChatJid, dmText);
     } catch {
       // best-effort
     }
