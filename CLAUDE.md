@@ -5,18 +5,23 @@ Bot 100% passivo que monitora grupos WhatsApp e arquiva todas as mensagens (text
 
 ## Stack
 - Node.js (ESM - `"type": "module"`)
-- `whatsapp-web.js` v1.26.0 — conexão via QR code + Puppeteer headless
-- Autenticação persistida em `./session/` (LocalAuth)
+- `@whiskeysockets/baileys` — conexão WebSocket direta (sem Chromium/Puppeteer)
+- `@sec-ant/zxing-wasm` — leitor de barcode ZXing C++ WASM (best-effort)
+- `sharp` — pré-processamento de imagens para leitura de barcode
+- Autenticação persistida em `./session/` (MultiFileAuthState)
 
 ## Arquitetura
-- `src/index.js` — entry point, valida config
-- `src/archiver.js` — conexão WhatsApp, listener de mensagens, buffer de agrupamento
+- `src/index.js` — entry point, valida config, contador de crashes
+- `src/archiver-baileys.js` — conexão WhatsApp (Baileys), listener de mensagens, buffer de agrupamento, health check, crash recovery, buffer persistente em disco
 - `src/storage.js` — salvamento de arquivos, organização por protocolo AS
-- `src/alerts.js` — alertas (console + WhatsApp DM para si mesmo + relatório diário)
+- `src/alerts.js` — alertas (console + WhatsApp grupo LOGS_BOT + relatório diário)
 - `src/config.js` — carrega .env
+- `src/barcode.js` — leitura de barcode em imagens (ZXing WASM, best-effort)
+- `src/excel.js` — integração Excel Online via Microsoft Graph API
+- `auth-excel.mjs` — autenticação one-time para o Excel (device code flow)
 
 ## Lógica de Protocolo/AS
-- Protocolo = 10 dígitos numéricos extraídos da legenda/caption
+- Protocolo = 10 dígitos numéricos extraídos da legenda/caption ou barcode
 - **Válido** (2025/2026 + 6 dígitos): salva em `archive/{grupo}/{protocolo}/`
 - **Fora do padrão**: salva em `archive/{grupo}/protocolo_revisar/{numero}/` + alerta
 - **Múltiplas legendas**: salva em `archive/{grupo}/sem_legenda/{autor}/{proto1_proto2}/` com subpastas
@@ -24,18 +29,38 @@ Bot 100% passivo que monitora grupos WhatsApp e arquiva todas as mensagens (text
 - Lógica baseada no organizer offline em `C:\Users\vinicius.oshima\Downloads\scripts\janeiro-sj\whatsapp-organizer.js`
 
 ## Buffer de Agrupamento
-- Quando chega mídia sem caption com protocolo, vai pro buffer (Map em memória)
-- Se texto com protocolo chega do mesmo autor em até 2 min → associa
-- Se timeout → salva em `sem_legenda/`
+- Quando chega mídia, vai pro buffer (Map em memória + backup em disco para crash recovery)
+- Se texto com protocolo chega do mesmo autor dentro do timeout → associa
+- Se timeout → flush: salva em `sem_legenda/` ou na pasta do protocolo
 - No shutdown (SIGINT/SIGTERM), flush de todos os buffers
+- **Timeout por grupo** configurável via `GROUP_BUFFER_MS` no `.env`
+  - `AGUA_TESTE_FEVEREIRO`: 10s (grupo de teste)
+  - `Batedor Ambiental`: 300s (vídeos demoram mais para subir)
+  - Demais: `BUFFER_TIMEOUT_MS` (padrão 60s)
+
+## Leitor de Barcode (best-effort)
+- Tenta ler barcode de cada imagem recebida (~200ms por foto)
+- Rotações: 0°, 90°, 180°, 270° + normalize+sharpen
+- Se barcode lido e nenhum protocolo digitado → usa barcode como protocolo
+- Se barcode divergir do protocolo digitado → alerta no LOGS_BOT
+- Funciona bem em fotos landscape com barcode claro; fotos comprimidas podem falhar
 
 ## Grupos Monitorados
-Configurados no `.env`: `Batedor Ambiental`, `Manutenção Rede Ambiental/SEMASA`, `AGUA_TESTE_FEVEREIRO`
+Configurados no `.env`: `Batedor Ambiental`, `Manutenção Rede Ambiental/SEMASA`, `AGUA_TESTE_FEVEREIRO`, `TOPOGRAFIA`
 
 ## Alertas
 - Console em tempo real
-- WhatsApp DM (chat "Você" — auto-detecta número via `client.info.wid`)
+- WhatsApp para o grupo `LOGS_BOT` (configurado em `ALERT_GROUP`)
 - Relatório diário em `archive/logs/{YYYY-MM-DD}_relatorio.txt` às 23:59
+
+## Integração Excel Online
+- Atualiza planilha SharePoint automaticamente ao salvar AS com protocolo válido
+- **Somente grupo Manutenção** alimenta a planilha; demais grupos ignorados
+- Fluxo: lê coluna A (linhas 2000-6000) → encontra protocolo → checa col F → escreve "Sim" em col J se >= 3 fotos, "X foto(s)" se < 3
+- Linhas com coluna F = "Batedor" são ignoradas silenciosamente
+- Configuração no `.env`: `EXCEL_FILE_ID`, `EXCEL_SHEET_NAME`, `EXCEL_STATUS_COL`
+- Token OAuth2 salvo em `archive/.excel_token.json` (renovado automaticamente)
+- **Primeira vez**: `node auth-excel.mjs` → abre navegador → login com conta corporativa → pronto
 
 ## Estrutura de Pastas Gerada
 ```
@@ -46,8 +71,12 @@ archive/
 │   ├── sem_legenda/{autor}/      # Sem legenda
 │   └── {YYYY-MM-DD}/
 │       └── mensagens.jsonl       # Log texto (1 JSON por linha)
-└── logs/
-    └── {YYYY-MM-DD}_relatorio.txt
+├── logs/
+│   ├── {YYYY-MM-DD}_relatorio.txt
+│   └── {YYYY-MM-DD}_processed.txt  # IDs processados (deduplicação)
+├── .buffer_temp/                 # Buffers persistentes (crash recovery)
+├── .last_active                  # Timestamp para catch-up inteligente
+└── .excel_token.json             # Token OAuth2 para Excel Online
 ```
 
 ## Resiliência / Auto-start
@@ -61,28 +90,30 @@ archive/
 
 ## PM2
 - `pm2 start ecosystem.config.cjs` — inicia o bot
+- `pm2 restart whatsapp-bila-organizer --update-env` — restart pegando novas variáveis de ambiente
 - `pm2 logs whatsapp-bila-organizer --raw` — logs sem prefixo (necessário pra escanear QR code)
-- `pm2 kill` — mata o daemon PM2 e todos os processos (usar quando Chrome zumbi travar)
+- `pm2 kill` — mata o daemon PM2 e todos os processos
 - Se precisar escanear QR code novo: `pm2 kill`, limpar `session/`, iniciar PM2, usar `--raw` pra ver QR
 - `ecosystem.config.cjs` — config do PM2
 
 ## Catch-up de Mensagens
-- No startup, busca as últimas 50 mensagens de cada grupo monitorado
-- Processa apenas mensagens da última 1 hora (`CATCHUP_WINDOW_MS`)
-- Evita perder mensagens enviadas enquanto o bot estava offline/reiniciando
+- No startup, processa mensagens enviadas enquanto o bot estava offline (tipo `append` do Baileys)
+- **Catch-up inteligente**: se ficou offline X horas, busca X+0.5h (teto: `MAX_CATCHUP_HOURS`)
+- Janela de catch-up dura 60s após conectar (suficiente para receber histórico do WhatsApp)
+- Deduplicação por ID de mensagem: arquivo `{YYYY-MM-DD}_processed.txt`
 
 ## Health Check / Auto-Recovery
-- **Health check a cada 5 min** via `client.getState()` no `archiver.js`
-- Se 3 falhas consecutivas → limpa sessão corrompida, mata o processo, PM2 reinicia
+- **Health check a cada 5 min** — verifica se `isConnected` ainda é true
+- Se 3 falhas consecutivas → limpa sessão, mata processo, PM2 reinicia
 - **Contador de crashes** no `index.js` via arquivo `.restart_count`
-  - Se o bot crashar 3x seguidas no `initialize()` → limpa a pasta `session/` automaticamente
+  - Se o bot crashar 3x seguidas → limpa a pasta `session/` automaticamente
   - Quando conecta com sucesso → reseta o contador
-- Após limpar sessão, um novo QR code será gerado (precisa escanear pelo celular)
-- Alertas de health check são enviados via DM no WhatsApp (se ainda conectado)
+- Após limpar sessão, novo QR code será gerado (escanear pelo celular)
 
 ## Comandos
 - `npm start` — inicia o bot
 - `npm install` — instala dependências
+- `node auth-excel.mjs` — autenticação one-time para Excel Online
 
 ## Projeto Relacionado
 - Bot original (interativo): `C:\Users\vinicius.oshima\Downloads\scripts\local-bot\`
