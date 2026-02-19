@@ -26,6 +26,7 @@ const ICONS = {
   salvo_sucesso: '✅',
   info: '📋',
   buffer_timeout: '⏱️',
+  barcode: '🔍',
 };
 
 export async function initAlerts(whatsappClient) {

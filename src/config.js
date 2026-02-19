@@ -22,6 +22,20 @@ export const CONFIG = {
   // Buffer de agrupamento
   bufferTimeoutMs: parseInt(process.env.BUFFER_TIMEOUT_MS || '120000', 10),
 
+  // Timeout de buffer por grupo (sobrescreve bufferTimeoutMs para grupos específicos)
+  // Formato: "NomeGrupo1:ms,NomeGrupo2:ms"  ex: "AGUA_TESTE_FEVEREIRO:10000"
+  groupBufferMs: Object.fromEntries(
+    (process.env.GROUP_BUFFER_MS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(s => {
+        const idx = s.lastIndexOf(':');
+        return [s.slice(0, idx).trim(), parseInt(s.slice(idx + 1), 10)];
+      })
+      .filter(([name, ms]) => name && !isNaN(ms))
+  ),
+
   // Catch-up: horas para buscar mensagens perdidas no startup
   catchupHours: parseFloat(process.env.CATCHUP_HOURS || '1'),
 
@@ -44,6 +58,11 @@ export const CONFIG = {
     // Protocolo válido: 2025 ou 2026 + 6 dígitos
     protocoloValido: /^(202[56]\d{6})$/,
   },
+
+  // Excel Online (Microsoft Graph API)
+  excelFileId: process.env.EXCEL_FILE_ID || '',
+  excelSheetName: process.env.EXCEL_SHEET_NAME || 'ASs entregues',
+  excelStatusCol: process.env.EXCEL_STATUS_COL || 'J',
 
   // Extensões aceitas
   mediaTypes: ['image', 'video'],

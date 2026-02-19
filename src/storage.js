@@ -247,6 +247,8 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
 
   // Limpa pasta temp após mover os arquivos
   cleanTempDir(bufferKey);
+
+  return { protocolosValidos, salvos };
 }
 
 // ============================================
