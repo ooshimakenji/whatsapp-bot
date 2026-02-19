@@ -229,10 +229,10 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
     }
   }
 
-  // Alerta de sucesso
-  const protoInfo = protocolosValidos.length > 0 ? ` → ${protocolosValidos.join(', ')}` : '';
+  // Alerta de sucesso — formato: [Nome][count → protocolo] Grupo
   if (salvos > 0) {
-    await addAlert('salvo_sucesso', `${salvos} mídia(s) de ${author} salva(s) em ${groupName}${protoInfo}`);
+    const protoStr = protocolosValidos.length > 0 ? ` → ${protocolosValidos.join(', ')}` : '';
+    await addAlert('salvo_sucesso', `[${author}][${salvos}${protoStr}] ${groupName}`);
   }
 
   // Registra contagem diária

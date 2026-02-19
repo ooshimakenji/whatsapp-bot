@@ -78,7 +78,16 @@ export function stopAlerts() {
 export async function addAlert(tipo, mensagem) {
   const icon = ICONS[tipo] || '•';
   const timestamp = new Date().toLocaleString('pt-BR');
-  const alertText = `${icon} [${timestamp}] ${mensagem}`;
+
+  // salvo_sucesso: conteúdo vem primeiro (aparece na miniatura do WhatsApp)
+  // demais: formato padrão com timestamp no início
+  const alertText = tipo === 'salvo_sucesso'
+    ? `${icon} ${mensagem} [${timestamp}]`
+    : `${icon} [${timestamp}] ${mensagem}`;
+
+  const whatsappText = tipo === 'salvo_sucesso'
+    ? `${mensagem} ${icon} [B.]`
+    : `${alertText} [B.]`;
 
   // Console
   console.log(`  ALERTA: ${alertText}`);
@@ -89,7 +98,7 @@ export async function addAlert(tipo, mensagem) {
   // WhatsApp grupo/DM — exceto tipos console-only
   if (client && alertChatJid && !CONSOLE_ONLY_TYPES.has(tipo)) {
     try {
-      await client.sendMessage(alertChatJid, `[Bila] ${alertText}`);
+      await client.sendMessage(alertChatJid, whatsappText);
     } catch (err) {
       console.error('  Erro ao enviar alerta:', err.message);
     }
