@@ -217,7 +217,10 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
       } else if (item.mediaData) {
         fs.writeFileSync(filePath, Buffer.from(item.mediaData, 'base64'));
       } else {
-        throw new Error('Sem dados de mídia disponíveis');
+        const motivo = item.filePath
+          ? `arquivo temp não encontrado: ${item.filePath}`
+          : 'sem dados de mídia (download pode ter falhado)';
+        throw new Error(motivo);
       }
       salvos++;
 
