@@ -13,6 +13,11 @@ session/
 temp/
 reports/
 logs/
+uploads/
+data/
+
+# QR Code gerado
+qrcode.png
 
 # Chaves privadas
 *.pem
