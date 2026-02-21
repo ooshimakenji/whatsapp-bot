@@ -264,7 +264,9 @@ function restoreSession(number, savedSession) {
     photos: photos,
     legend: savedSession.legend,
     collaboratorName: savedSession.collaboratorName,
-    todayCount: savedSession.todayCount || 0
+    todayCount: savedSession.todayCount || 0,
+    photoHashes: new Set(),
+    duplicateCount: 0
   });
 
   return photos.length;
