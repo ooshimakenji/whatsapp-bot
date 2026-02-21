@@ -2,7 +2,7 @@ const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
-const { ensureDir, getPhotosFolder } = require('./storage');
+const { ensureDir, getPhotosFolder, getReportsFolder } = require('./storage');
 
 // Configuracao do transporter
 let transporter = null;
@@ -16,9 +16,7 @@ if (config.email.user && config.email.pass) {
       user: config.email.user,
       pass: config.email.pass
     },
-    tls: {
-      ciphers: 'SSLv3'
-    }
+
   });
 }
 
@@ -102,7 +100,7 @@ function logActivity(activity) {
  * Salva estatisticas em arquivo JSON
  */
 function saveStatsToFile() {
-  const reportsDir = getPhotosFolder();
+  const reportsDir = getReportsFolder();
   ensureDir(reportsDir);
 
   const fileName = `relatorio_${dailyStats.date}.json`;
