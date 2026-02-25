@@ -79,6 +79,13 @@ archive/
 └── .excel_token.json             # Token OAuth2 para Excel Online
 ```
 
+## Drive de Arquivo / Caminho Reserva
+- **Drive principal**: `X:\Contrato 005-2024\2026\02 - Fevereiro\Registros Fotográficos\Água\FOTOS_SEM_AS` (configurado em `ARCHIVE_DIR`)
+- **Caminho reserva**: `C:\Users\vinicius.oshima\Downloads\fotos-reserva` (configurado em `ARCHIVE_FALLBACK_DIR`)
+- Se o drive X: não estiver disponível no startup, o bot tenta 3x (30s entre cada) e depois muda automaticamente para o caminho reserva
+- Alerta enviado no LOGS_BOT informando qual caminho está sendo usado
+- Após reconectar o drive X:, mover os arquivos de `fotos-reserva` manualmente para o local correto
+
 ## Resiliência / Auto-start
 - **Botão power do notebook** configurado para "não fazer nada" (evita desligamento acidental)
   - Revertir: Configurações > Sistema > Energia > "Botão de energia"
