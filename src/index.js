@@ -36,8 +36,15 @@ async function checkConfig() {
         await new Promise(r => setTimeout(r, DRIVE_RETRY_MS));
       } else if (isDriveError) {
         console.warn(`\n  [AVISO] Drive ainda indisponivel apos ${DRIVE_MAX_RETRIES} tentativas.`);
+        const driveOriginal = CONFIG.archiveDir;
+        if (CONFIG.archiveFallbackDir) {
+          console.warn(`  Usando caminho reserva: ${CONFIG.archiveFallbackDir}\n`);
+          CONFIG.archiveDir = CONFIG.archiveFallbackDir;
+          fs.mkdirSync(CONFIG.archiveDir, { recursive: true });
+          return `Drive indisponivel (${driveOriginal}) — arquivos salvos no caminho reserva: ${CONFIG.archiveFallbackDir}`;
+        }
         console.warn('  Bot iniciara sem acesso ao drive — alerta sera enviado via WhatsApp.\n');
-        return `Drive indisponivel no startup: ${CONFIG.archiveDir} (${err.code})`;
+        return `Drive indisponivel no startup: ${driveOriginal} (${err.code})`;
       } else {
         throw err; // Outros erros ainda crasham normalmente
       }
@@ -55,6 +62,9 @@ async function main() {
   console.log('');
   console.log(`  Grupos: ${CONFIG.groups.join(', ')}`);
   console.log(`  Arquivo: ${CONFIG.archiveDir}`);
+  if (CONFIG.archiveFallbackDir) {
+    console.log(`  Reserva: ${CONFIG.archiveFallbackDir}`);
+  }
   console.log(`  Buffer: ${CONFIG.bufferTimeoutMs / 1000}s`);
   console.log('');
 

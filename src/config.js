@@ -17,6 +17,9 @@ export const CONFIG = {
 
   // Diretórios
   archiveDir: path.resolve(ROOT_DIR, process.env.ARCHIVE_DIR || './archive'),
+  archiveFallbackDir: process.env.ARCHIVE_FALLBACK_DIR
+    ? path.resolve(ROOT_DIR, process.env.ARCHIVE_FALLBACK_DIR)
+    : null,
   sessionDir: path.resolve(ROOT_DIR, './session'),
 
   // Buffer de agrupamento
