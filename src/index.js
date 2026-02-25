@@ -7,17 +7,43 @@ import path from 'path';
 const RESTART_FILE = path.resolve(CONFIG.sessionDir, '..', '.restart_count');
 const MAX_RESTARTS_BEFORE_CLEAR = 3;
 
-function checkConfig() {
+const DRIVE_MAX_RETRIES = 3;
+const DRIVE_RETRY_MS = 30_000; // 30s entre tentativas
+
+async function checkConfig() {
   if (CONFIG.groups.length === 0) {
     console.error('  Nenhum grupo configurado! Defina GROUPS no .env');
     console.error('  Exemplo: GROUPS=Grupo 1, Grupo 2');
     process.exit(1);
   }
 
-  // Garante que diretório de archive existe
-  if (!fs.existsSync(CONFIG.archiveDir)) {
-    fs.mkdirSync(CONFIG.archiveDir, { recursive: true });
+  // Tenta criar o diretório de archive com retry se o drive não estiver disponível
+  for (let attempt = 1; attempt <= DRIVE_MAX_RETRIES + 1; attempt++) {
+    try {
+      if (!fs.existsSync(CONFIG.archiveDir)) {
+        fs.mkdirSync(CONFIG.archiveDir, { recursive: true });
+      }
+      if (attempt > 1) {
+        console.log('  Drive disponível — continuando...');
+        return `Drive estava indisponível no startup (disponível após ${attempt - 1} tentativa(s))`;
+      }
+      return null; // Sem aviso — drive estava ok desde o início
+    } catch (err) {
+      const isDriveError = ['ENOENT', 'ENOTCONN', 'ENODEV', 'ENOMEDIUM', 'EIO'].includes(err.code);
+      if (isDriveError && attempt <= DRIVE_MAX_RETRIES) {
+        console.warn(`\n  [AVISO] Drive indisponivel: ${CONFIG.archiveDir} (${err.code})`);
+        console.warn(`  Tentando novamente em ${DRIVE_RETRY_MS / 1000}s... (${attempt}/${DRIVE_MAX_RETRIES})\n`);
+        await new Promise(r => setTimeout(r, DRIVE_RETRY_MS));
+      } else if (isDriveError) {
+        console.warn(`\n  [AVISO] Drive ainda indisponivel apos ${DRIVE_MAX_RETRIES} tentativas.`);
+        console.warn('  Bot iniciara sem acesso ao drive — alerta sera enviado via WhatsApp.\n');
+        return `Drive indisponivel no startup: ${CONFIG.archiveDir} (${err.code})`;
+      } else {
+        throw err; // Outros erros ainda crasham normalmente
+      }
+    }
   }
+  return null;
 }
 
 async function main() {
@@ -32,8 +58,8 @@ async function main() {
   console.log(`  Buffer: ${CONFIG.bufferTimeoutMs / 1000}s`);
   console.log('');
 
-  checkConfig();
-  await startArchiver();
+  const driveWarning = await checkConfig();
+  await startArchiver(driveWarning);
 }
 
 main().catch((err) => {

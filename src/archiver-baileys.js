@@ -50,6 +50,7 @@ let healthCheckInterval = null;
 let catchupCutoff = 0;     // Timestamp mínimo para mensagens de catch-up
 let catchupActive = false; // Ativo durante janela de startup
 let shutdownRegistered = false;
+let pendingDriveWarning = null; // Aviso de drive indisponível no startup
 
 const MAX_FAILURES = 3;
 const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -189,7 +190,8 @@ async function loadAndRestorePersistentBuffers() {
 // PONTO DE ENTRADA
 // ============================================
 
-export async function startArchiver() {
+export async function startArchiver(driveWarning = null) {
+  pendingDriveWarning = driveWarning;
   // Registra handlers de shutdown apenas uma vez
   if (!shutdownRegistered) {
     process.on('SIGINT', shutdown);
@@ -286,6 +288,11 @@ async function onReady() {
   const clientAdapter = makeAlertsAdapter();
   await initAlerts(clientAdapter);
   await addAlert('info', 'Bot iniciado com sucesso! (Baileys)');
+
+  if (pendingDriveWarning) {
+    await addAlert('erro', `Drive indisponivel no startup — ${pendingDriveWarning}`);
+    pendingDriveWarning = null;
+  }
 
   await loadAndRestorePersistentBuffers();
   await findGroups();
