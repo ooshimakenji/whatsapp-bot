@@ -99,6 +99,9 @@ archive/
   - Executa `start-bot.bat` (janela minimizada)
   - Para desativar: deletar o atalho acima
 - `start-bot.bat` — script que faz `cd` no projeto e roda `npm start`
+- **Drive indisponível no startup** → retry 3×30s → fallback automático para `fotos-reserva` (ver seção Drive)
+- **Memory leak** → PM2 reinicia o processo automaticamente ao atingir 400MB
+- **Reinicio preventivo** → PM2 reinicia todo dia às 7:30 (Brasília) via cron
 
 ## PM2
 - `pm2 start ecosystem.config.cjs` — inicia o bot
