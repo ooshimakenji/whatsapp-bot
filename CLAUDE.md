@@ -107,6 +107,8 @@ archive/
 - `pm2 kill` — mata o daemon PM2 e todos os processos
 - Se precisar escanear QR code novo: `pm2 kill`, limpar `session/`, iniciar PM2, usar `--raw` pra ver QR
 - `ecosystem.config.cjs` — config do PM2
+  - `max_memory_restart: '400M'` — reinicia automaticamente se o processo ultrapassar 400MB (proteção contra memory leak)
+  - `cron_restart: '30 7 * * *'` — reinicio preventivo todo dia às 7:30 (Brasília), antes do expediente
 
 ## Catch-up de Mensagens
 - No startup, processa mensagens enviadas enquanto o bot estava offline (tipo `append` do Baileys)
