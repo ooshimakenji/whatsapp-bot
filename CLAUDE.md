@@ -11,7 +11,7 @@ Bot 100% passivo que monitora grupos WhatsApp e arquiva todas as mensagens (text
 - Autenticação persistida em `./session/` (MultiFileAuthState)
 
 ## Arquitetura
-- `src/index.js` — entry point, valida config, contador de crashes
+- `src/index.js` — entry point, valida config, retry de drive (3×30s), contador de crashes
 - `src/archiver-baileys.js` — conexão WhatsApp (Baileys), listener de mensagens, buffer de agrupamento, health check, crash recovery, buffer persistente em disco
 - `src/storage.js` — salvamento de arquivos, organização por protocolo AS
 - `src/alerts.js` — alertas (console + WhatsApp grupo LOGS_BOT + relatório diário)
@@ -82,8 +82,13 @@ archive/
 ## Drive de Arquivo / Caminho Reserva
 - **Drive principal**: `X:\Contrato 005-2024\2026\02 - Fevereiro\Registros Fotográficos\Água\FOTOS_SEM_AS` (configurado em `ARCHIVE_DIR`)
 - **Caminho reserva**: `C:\Users\vinicius.oshima\Downloads\fotos-reserva` (configurado em `ARCHIVE_FALLBACK_DIR`)
-- Se o drive X: não estiver disponível no startup, o bot tenta 3x (30s entre cada) e depois muda automaticamente para o caminho reserva
-- Alerta enviado no LOGS_BOT informando qual caminho está sendo usado
+- No startup, `checkConfig` tenta acessar o drive principal até **3 vezes** (30s entre cada tentativa)
+  - Drive disponível desde o início → funciona normalmente, sem aviso
+  - Drive conecta durante os retries → continua normalmente + alerta no LOGS_BOT
+  - Drive indisponível após 3 tentativas → **muda automaticamente para o caminho reserva** + alerta no LOGS_BOT
+  - Sem `ARCHIVE_FALLBACK_DIR` configurado → bot inicia mas salvamentos falharão + alerta no LOGS_BOT
+- O alerta informa exatamente qual caminho está sendo usado
+- Erros de drive: `ENOENT`, `ENOTCONN`, `ENODEV`, `ENOMEDIUM`, `EIO` — outros erros ainda crasham
 - Após reconectar o drive X:, mover os arquivos de `fotos-reserva` manualmente para o local correto
 
 ## Resiliência / Auto-start
