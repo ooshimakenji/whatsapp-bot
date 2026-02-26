@@ -11,6 +11,7 @@ Bot automatico que monitora grupos do WhatsApp e arquiva todas as fotos e videos
 - Batedor Ambiental
 - Manutencao Rede Ambiental/SEMASA
 - AGUA_TESTE_FEVEREIRO
+- TOPOGRAFIA
 
 Novos grupos podem ser adicionados editando o arquivo `.env`.
 
@@ -84,6 +85,7 @@ O bot envia mensagem direta para o administrador quando:
 | Sem legenda (timeout) | ⏱️ | Midias sem protocolo apos timeout |
 | Grupo nao encontrado | ❌ | Grupo configurado mas nao acessivel |
 | Disco cheio | 💾 | Espaco em disco abaixo de 2 GB |
+| Drive indisponivel | ⚠️ | Drive X: nao acessivel no startup — informa se usou caminho reserva |
 
 ### Relatorio Diario (23:59)
 
@@ -150,6 +152,19 @@ Audio, documentos e figurinhas sao ignorados.
 - Inicia automaticamente quando o computador liga
 - **Bloquear a tela (Win+L):** bot continua rodando
 - **Suspender/hibernar:** bot para (configuracao atual: suspensao desativada)
+- **Reinicio preventivo diario:** todo dia as 7:30 o bot reinicia automaticamente (limpeza de memoria)
+- **Protecao contra travamento de memoria:** reinicia automaticamente se ultrapassar 400 MB de RAM
+
+### Drive de Rede (X:)
+
+O bot salva as midias no drive de rede `X:`. Se o drive nao estiver conectado quando o computador ligar:
+
+1. O bot tenta reconectar ao drive por ate **1 minuto e meio** (3 tentativas de 30s)
+2. Se o drive conectar nesse periodo, continua normalmente
+3. Se nao conectar, **salva automaticamente em** `C:\Users\vinicius.oshima\Downloads\fotos-reserva`
+4. Envia alerta no WhatsApp informando que esta usando o caminho reserva
+
+Apos reconectar o drive X:, os arquivos salvos em `fotos-reserva` devem ser movidos manualmente para o local correto.
 
 ---
 
@@ -182,7 +197,7 @@ Abrir qualquer terminal (PowerShell ou CMD) e executar:
 
 | Recurso | Uso |
 |---|---|
-| RAM | ~200-400 MB |
+| RAM | ~80-150 MB (reinicia automaticamente se ultrapassar 400 MB) |
 | CPU | ~0% (so processa quando chega mensagem) |
 | Disco | Depende do volume de fotos/videos |
 
@@ -192,8 +207,9 @@ Abrir qualquer terminal (PowerShell ou CMD) e executar:
 
 | Variavel | Valor Atual | Descricao |
 |---|---|---|
-| GROUPS | Batedor Ambiental, Manutencao Rede Ambiental/SEMASA, AGUA_TESTE_FEVEREIRO | Grupos monitorados |
-| ARCHIVE_DIR | ./archive | Pasta de destino |
-| BUFFER_TIMEOUT_MS | 30000 | Tempo de espera apos ultima mensagem (30s) |
-| ALERT_NUMBER | (auto) | Numero para alertas DM |
+| GROUPS | Batedor Ambiental, Manutencao Rede Ambiental/SEMASA, AGUA_TESTE_FEVEREIRO, TOPOGRAFIA | Grupos monitorados |
+| ARCHIVE_DIR | X:\Contrato 005-2024\2026\02 - Fevereiro\...\FOTOS_SEM_AS | Pasta de destino principal (drive de rede) |
+| ARCHIVE_FALLBACK_DIR | C:\Users\vinicius.oshima\Downloads\fotos-reserva | Pasta reserva se drive X: nao estiver disponivel |
+| BUFFER_TIMEOUT_MS | 60000 | Tempo de espera apos ultima mensagem (60s) |
+| ALERT_GROUP | LOGS_BOT | Grupo WhatsApp para receber alertas |
 | DISK_WARN_GB | 2 | Alerta quando disco abaixo de X GB |
