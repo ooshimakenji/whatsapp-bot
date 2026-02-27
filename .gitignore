@@ -1,6 +1,7 @@
 node_modules/
 session/
 archive/
+logs/
 .env
 qrcode.png
 .wwebjs_cache/

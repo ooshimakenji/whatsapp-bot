@@ -23,6 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { CONFIG } from './config.js';
 import { initAlerts, stopAlerts, addAlert } from './alerts.js';
+import { logEvent } from './eventlog.js';
 import {
   saveTextMessage,
   saveBufferedBlock,
@@ -72,6 +73,8 @@ const noopLogger = {
 // DEDUPLICAÇÃO DE MENSAGENS
 // ============================================
 
+const PROCESSED_RETENTION_DAYS = 30;
+
 function loadProcessedIds() {
   const logsDir = path.join(CONFIG.archiveDir, 'logs');
   if (!fs.existsSync(logsDir)) return;
@@ -88,6 +91,22 @@ function loadProcessedIds() {
     } catch { /* ignora */ }
   }
   if (count > 0) console.log(`  [Dedup] ${count} ID(s) já processados carregados`);
+
+  // Limpa _processed.txt com mais de PROCESSED_RETENTION_DAYS dias
+  try {
+    const cutoff = Date.now() - PROCESSED_RETENTION_DAYS * 86400000;
+    const files = fs.readdirSync(logsDir).filter(f => f.endsWith('_processed.txt'));
+    let deleted = 0;
+    for (const file of files) {
+      const dateStr = file.replace('_processed.txt', '');
+      const fileDate = new Date(dateStr).getTime();
+      if (!isNaN(fileDate) && fileDate < cutoff) {
+        fs.unlinkSync(path.join(logsDir, file));
+        deleted++;
+      }
+    }
+    if (deleted > 0) console.log(`  [Dedup] ${deleted} arquivo(s) antigo(s) removidos`);
+  } catch { /* best-effort */ }
 }
 
 function markAsProcessed(msgId) {
@@ -274,6 +293,7 @@ async function onReady() {
   console.log('  Bot conectado e pronto!\n');
   isConnected = true;
   consecutiveFailures = 0;
+  logEvent('CONECTADO', 'WhatsApp conectado com sucesso', `Arquivo: ${CONFIG.archiveDir}`);
 
   // Reseta contador de crashes
   const restartFile = path.join(path.dirname(CONFIG.sessionDir), '.restart_count');
@@ -388,6 +408,7 @@ function stopHealthCheck() {
 
 async function autoRecover() {
   console.log('  [Health Check] Muitas falhas — limpando sessão e reiniciando...');
+  logEvent('SESSAO_LIMPA', `Health check falhou ${MAX_FAILURES}x — sessão limpa automaticamente`);
   await addAlert('erro', `Bot desconectado após ${MAX_FAILURES} falhas. Limpando sessão (vai precisar escanear QR code).`);
 
   stopHealthCheck();
@@ -412,6 +433,7 @@ async function autoRecover() {
 
 const shutdown = async () => {
   console.log('\n  Encerrando...');
+  logEvent('SHUTDOWN', 'Bot encerrado normalmente');
   updateLastActive();
   await flushAllBuffers();
   stopAlerts();

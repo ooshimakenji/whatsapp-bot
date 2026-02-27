@@ -1,5 +1,6 @@
 import { CONFIG } from './config.js';
 import { startArchiver } from './archiver-baileys.js';
+import { logEvent } from './eventlog.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -33,6 +34,7 @@ async function checkConfig() {
       if (isDriveError && attempt <= DRIVE_MAX_RETRIES) {
         console.warn(`\n  [AVISO] Drive indisponivel: ${CONFIG.archiveDir} (${err.code})`);
         console.warn(`  Tentando novamente em ${DRIVE_RETRY_MS / 1000}s... (${attempt}/${DRIVE_MAX_RETRIES})\n`);
+        logEvent('DRIVE_RETRY', `Drive indisponivel, tentativa ${attempt}/${DRIVE_MAX_RETRIES}`, `${CONFIG.archiveDir} (${err.code})`);
         await new Promise(r => setTimeout(r, DRIVE_RETRY_MS));
       } else if (isDriveError) {
         console.warn(`\n  [AVISO] Drive ainda indisponivel apos ${DRIVE_MAX_RETRIES} tentativas.`);
@@ -41,8 +43,10 @@ async function checkConfig() {
           console.warn(`  Usando caminho reserva: ${CONFIG.archiveFallbackDir}\n`);
           CONFIG.archiveDir = CONFIG.archiveFallbackDir;
           fs.mkdirSync(CONFIG.archiveDir, { recursive: true });
+          logEvent('DRIVE_FALLBACK', 'Drive indisponivel — usando caminho reserva', `${driveOriginal} → ${CONFIG.archiveFallbackDir}`);
           return `Drive indisponivel (${driveOriginal}) — arquivos salvos no caminho reserva: ${CONFIG.archiveFallbackDir}`;
         }
+        logEvent('DRIVE_ERRO', 'Drive indisponivel sem caminho reserva configurado', `${driveOriginal} (${err.code})`);
         console.warn('  Bot iniciara sem acesso ao drive — alerta sera enviado via WhatsApp.\n');
         return `Drive indisponivel no startup: ${driveOriginal} (${err.code})`;
       } else {
@@ -68,12 +72,14 @@ async function main() {
   console.log(`  Buffer: ${CONFIG.bufferTimeoutMs / 1000}s`);
   console.log('');
 
+  logEvent('STARTUP', 'Bot iniciando', `Arquivo: ${CONFIG.archiveDir} | Grupos: ${CONFIG.groups.join(', ')}`);
   const driveWarning = await checkConfig();
   await startArchiver(driveWarning);
 }
 
 main().catch((err) => {
   console.error('  Erro fatal:', err);
+  logEvent('CRASH', err.message || 'Erro fatal desconhecido', err.code || '');
 
   // Conta restarts — se crashar muitas vezes seguidas, limpa sessão
   let restartCount = 0;
