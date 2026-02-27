@@ -145,11 +145,21 @@ export function loadPersistentBuffers() {
   return results;
 }
 
-function cleanTempDir(bufferKey) {
+function cleanTempDir(bufferKey, items = null) {
   if (!bufferKey) return;
   const tempDir = path.join(CONFIG.bufferTempDir, sanitizeBufferKey(bufferKey));
   try {
-    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+    if (items) {
+      // Apaga apenas os arquivos deste buffer — evita deletar arquivos
+      // do próximo buffer que já podem ter chegado na mesma pasta
+      for (const item of items) {
+        try { if (item.filePath) fs.unlinkSync(item.filePath); } catch {}
+      }
+      try { fs.unlinkSync(path.join(tempDir, 'meta.json')); } catch {}
+      try { fs.rmdirSync(tempDir); } catch {} // só remove se estiver vazia
+    } else {
+      if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   } catch { /* best effort */ }
 }
 
@@ -248,8 +258,8 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
     await addAlert(alertType, alertMsg);
   }
 
-  // Limpa pasta temp após mover os arquivos
-  cleanTempDir(bufferKey);
+  // Limpa pasta temp após mover os arquivos (só os arquivos deste buffer)
+  cleanTempDir(bufferKey, bufferedItems);
 
   return { protocolosValidos, salvos };
 }
