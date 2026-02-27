@@ -16,6 +16,7 @@ Bot 100% passivo que monitora grupos WhatsApp e arquiva todas as mensagens (text
 - `src/storage.js` — salvamento de arquivos, organização por protocolo AS
 - `src/alerts.js` — alertas (console + WhatsApp grupo LOGS_BOT + relatório diário)
 - `src/config.js` — carrega .env
+- `src/eventlog.js` — log centralizado de eventos críticos em `logs/eventos.csv` (abre no Excel)
 - `src/barcode.js` — leitura de barcode em imagens (ZXing WASM, best-effort)
 - `src/excel.js` — integração Excel Online via Microsoft Graph API
 - `auth-excel.mjs` — autenticação one-time para o Excel (device code flow)
@@ -73,11 +74,30 @@ archive/
 │       └── mensagens.jsonl       # Log texto (1 JSON por linha)
 ├── logs/
 │   ├── {YYYY-MM-DD}_relatorio.txt
-│   └── {YYYY-MM-DD}_processed.txt  # IDs processados (deduplicação)
+│   └── {YYYY-MM-DD}_processed.txt  # IDs processados (deduplicação, auto-limpeza 30 dias)
 ├── .buffer_temp/                 # Buffers persistentes (crash recovery)
 ├── .last_active                  # Timestamp para catch-up inteligente
 └── .excel_token.json             # Token OAuth2 para Excel Online
+
+logs/                             # LOCAL ao projeto (não depende do drive X:)
+└── eventos.csv                   # Log centralizado de eventos críticos (abre no Excel)
 ```
+
+## Log de Eventos (`logs/eventos.csv`)
+- Arquivo CSV local (não depende do drive X:), abre diretamente no Excel
+- Colunas: `Data | Hora | Tipo | Mensagem | Detalhes`
+- Eventos registrados:
+
+| Tipo | Quando |
+|---|---|
+| `STARTUP` | Bot inicia |
+| `DRIVE_RETRY` | Tentativa de reconexão ao drive X: |
+| `DRIVE_FALLBACK` | Troca automática para caminho reserva |
+| `DRIVE_ERRO` | Drive indisponível e sem fallback configurado |
+| `CONECTADO` | WhatsApp conectado com sucesso |
+| `SESSAO_LIMPA` | Health check limpou sessão após 3 falhas |
+| `SHUTDOWN` | Bot encerrado normalmente (SIGINT/SIGTERM) |
+| `CRASH` | Erro fatal |
 
 ## Drive de Arquivo / Caminho Reserva
 - **Drive principal**: `X:\Contrato 005-2024\2026\02 - Fevereiro\Registros Fotográficos\Água\FOTOS_SEM_AS` (configurado em `ARCHIVE_DIR`)
@@ -112,12 +132,14 @@ archive/
 - `ecosystem.config.cjs` — config do PM2
   - `max_memory_restart: '400M'` — reinicia automaticamente se o processo ultrapassar 400MB (proteção contra memory leak)
   - `cron_restart: '30 7 * * *'` — reinicio preventivo todo dia às 7:30 (Brasília), antes do expediente
+- **pm2-logrotate** instalado — rotação automática dos logs do PM2 a cada 10MB, retém 7 arquivos comprimidos
 
 ## Catch-up de Mensagens
 - No startup, processa mensagens enviadas enquanto o bot estava offline (tipo `append` do Baileys)
 - **Catch-up inteligente**: se ficou offline X horas, busca X+0.5h (teto: `MAX_CATCHUP_HOURS`)
 - Janela de catch-up dura 60s após conectar (suficiente para receber histórico do WhatsApp)
 - Deduplicação por ID de mensagem: arquivo `{YYYY-MM-DD}_processed.txt`
+- Arquivos `_processed.txt` com mais de 30 dias são removidos automaticamente no startup
 
 ## Health Check / Auto-Recovery
 - **Health check a cada 5 min** — verifica se `isConnected` ainda é true
