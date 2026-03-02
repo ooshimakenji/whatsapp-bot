@@ -224,6 +224,13 @@ export async function startArchiver(driveWarning = null) {
 }
 
 async function connect() {
+  // Remove listeners do socket anterior para evitar que eventos antigos
+  // disparem handleConnectionUpdate e criem novos sockets em loop
+  if (sock) {
+    try { sock.ev.removeAllListeners(); } catch { /* ignora */ }
+    try { sock.ws?.close(); } catch { /* ignora */ }
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(CONFIG.sessionDir);
   const { version } = await fetchLatestBaileysVersion();
 
