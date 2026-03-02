@@ -52,6 +52,7 @@ let catchupCutoff = 0;     // Timestamp mínimo para mensagens de catch-up
 let catchupActive = false; // Ativo durante janela de startup
 let shutdownRegistered = false;
 let pendingDriveWarning = null; // Aviso de drive indisponível no startup
+let lastDisconnectTime = 0;    // Para evitar spam de CONECTADO no eventlog
 
 const MAX_FAILURES = 3;
 const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -259,11 +260,13 @@ async function handleConnectionUpdate({ connection, qr, lastDisconnect }) {
 
   if (connection === 'close') {
     isConnected = false;
+    lastDisconnectTime = Date.now();
     stopHealthCheck();
 
     const code = lastDisconnect?.error?.output?.statusCode;
     const reason = lastDisconnect?.error?.message || 'desconhecido';
     console.log(`  Conexão encerrada — código: ${code}, motivo: ${reason}`);
+    logEvent('DESCONECTADO', `Conexão encerrada (código ${code})`, reason);
 
     if (code === DisconnectReason.loggedOut) {
       console.log('  Sessão expirada — limpe a pasta session/ e reinicie.');
@@ -283,8 +286,9 @@ async function handleConnectionUpdate({ connection, qr, lastDisconnect }) {
       }
     }
 
-    // Aguarda 3s antes de reconectar para evitar loop rápido
-    await new Promise(r => setTimeout(r, 3000));
+    // Conflict (440): outra sessão ativa — espera mais para o WhatsApp liberar
+    const delay = code === 440 ? 15000 : 3000;
+    await new Promise(r => setTimeout(r, delay));
     await connect();
   }
 }
@@ -293,7 +297,10 @@ async function onReady() {
   console.log('  Bot conectado e pronto!\n');
   isConnected = true;
   consecutiveFailures = 0;
-  logEvent('CONECTADO', 'WhatsApp conectado com sucesso', `Arquivo: ${CONFIG.archiveDir}`);
+  // Só loga CONECTADO se ficou desconectado por mais de 10s (evita spam durante reconexões rápidas)
+  if (Date.now() - lastDisconnectTime > 10000) {
+    logEvent('CONECTADO', 'WhatsApp conectado com sucesso', `Arquivo: ${CONFIG.archiveDir}`);
+  }
 
   // Reseta contador de crashes
   const restartFile = path.join(path.dirname(CONFIG.sessionDir), '.restart_count');
