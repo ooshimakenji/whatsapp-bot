@@ -146,9 +146,10 @@ logs/                             # LOCAL ao projeto (não depende do drive X:)
 
 ## Reconexão / Conflict (440)
 - Erro 440 (`Stream Errored (conflict)`) ocorre quando o cron_restart reinicia o bot antes da sessão anterior ser liberada pelo WhatsApp
-- Ao receber erro 440, o bot aguarda **15s** antes de reconectar (antes era 3s), dando tempo ao WhatsApp liberar a sessão
+- Ao receber erro 440, o bot aguarda **15s** antes de reconectar, dando tempo ao WhatsApp liberar a sessão
 - Outros erros de desconexão aguardam 3s antes de reconectar
 - Após 3 falhas consecutivas → `autoRecover()` limpa sessão e reinicia
+- **Bug corrigido (2026-03-02):** ao reconectar, o socket anterior tinha listeners ativos que disparavam `handleConnectionUpdate` de novo, criando um novo socket que conflitava com o atual — loop infinito onde o bot competia consigo mesmo. Fix: `sock.ev.removeAllListeners()` + `sock.ws?.close()` antes de criar novo socket
 
 ## Health Check / Auto-Recovery
 - **Health check a cada 5 min** — verifica se `isConnected` ainda é true
