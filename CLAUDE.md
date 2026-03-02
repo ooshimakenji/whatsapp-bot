@@ -94,7 +94,8 @@ logs/                             # LOCAL ao projeto (não depende do drive X:)
 | `DRIVE_RETRY` | Tentativa de reconexão ao drive X: |
 | `DRIVE_FALLBACK` | Troca automática para caminho reserva |
 | `DRIVE_ERRO` | Drive indisponível e sem fallback configurado |
-| `CONECTADO` | WhatsApp conectado com sucesso |
+| `CONECTADO` | WhatsApp conectado (só loga se desconectado por >10s — evita spam) |
+| `DESCONECTADO` | Conexão encerrada (código + motivo) |
 | `SESSAO_LIMPA` | Health check limpou sessão após 3 falhas |
 | `SHUTDOWN` | Bot encerrado normalmente (SIGINT/SIGTERM) |
 | `CRASH` | Erro fatal |
@@ -137,9 +138,17 @@ logs/                             # LOCAL ao projeto (não depende do drive X:)
 ## Catch-up de Mensagens
 - No startup, processa mensagens enviadas enquanto o bot estava offline (tipo `append` do Baileys)
 - **Catch-up inteligente**: se ficou offline X horas, busca X+0.5h (teto: `MAX_CATCHUP_HOURS`)
+- `MAX_CATCHUP_HOURS=72` — cobre fim de expediente sexta (~18h) até segunda de manhã (~8h)
 - Janela de catch-up dura 60s após conectar (suficiente para receber histórico do WhatsApp)
+- Limite do WhatsApp: mídias ficam disponíveis no servidor por ~7 dias; textos por mais tempo
 - Deduplicação por ID de mensagem: arquivo `{YYYY-MM-DD}_processed.txt`
 - Arquivos `_processed.txt` com mais de 30 dias são removidos automaticamente no startup
+
+## Reconexão / Conflict (440)
+- Erro 440 (`Stream Errored (conflict)`) ocorre quando o cron_restart reinicia o bot antes da sessão anterior ser liberada pelo WhatsApp
+- Ao receber erro 440, o bot aguarda **15s** antes de reconectar (antes era 3s), dando tempo ao WhatsApp liberar a sessão
+- Outros erros de desconexão aguardam 3s antes de reconectar
+- Após 3 falhas consecutivas → `autoRecover()` limpa sessão e reinicia
 
 ## Health Check / Auto-Recovery
 - **Health check a cada 5 min** — verifica se `isConnected` ainda é true
