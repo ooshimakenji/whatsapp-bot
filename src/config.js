@@ -20,10 +20,29 @@ export const CONFIG = {
   archiveFallbackDir: process.env.ARCHIVE_FALLBACK_DIR
     ? path.resolve(ROOT_DIR, process.env.ARCHIVE_FALLBACK_DIR)
     : null,
+  // Diretório de arquivo por grupo — sobrescreve archiveDir para grupos específicos
+  // Formato no .env: "NomeGrupo=Z:\caminho;OutroGrupo=X:\outro"
+  groupArchiveDirs: Object.fromEntries(
+    (process.env.GROUP_ARCHIVE_DIRS || '')
+      .split(';')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(s => {
+        const idx = s.indexOf('=');
+        if (idx === -1) return null;
+        return [s.slice(0, idx).trim(), s.slice(idx + 1).trim()];
+      })
+      .filter(Boolean)
+  ),
   sessionDir: path.resolve(ROOT_DIR, './session'),
+  logsDir: path.resolve(ROOT_DIR, 'logs'),
 
   // Buffer de agrupamento
   bufferTimeoutMs: parseInt(process.env.BUFFER_TIMEOUT_MS || '120000', 10),
+  // Gap entre mídias do mesmo autor para separar em lotes distintos
+  // Se a nova mídia chegou mais de X ms depois da anterior, considera novo lote
+  // 0 = desativado  |  padrão: 30s
+  intraBufGapMs: parseInt(process.env.INTRA_BUFFER_GAP_MS || '30000', 10),
 
   // Timeout de buffer por grupo (sobrescreve bufferTimeoutMs para grupos específicos)
   // Formato: "NomeGrupo1:ms,NomeGrupo2:ms"  ex: "AGUA_TESTE_FEVEREIRO:10000"
@@ -50,9 +69,13 @@ export const CONFIG = {
   // Catch-up inteligente
   maxCatchupHours: parseFloat(process.env.MAX_CATCHUP_HOURS || '12'),
 
-  // Buffer temp em disco (crash recovery)
-  bufferTempDir: path.resolve(ROOT_DIR, 'archive/.buffer_temp'),
-  lastActiveFile: path.resolve(ROOT_DIR, 'archive/.last_active'),
+  // Buffer temp em disco (crash recovery) — configurável via BUFFER_TEMP_DIR no .env
+  bufferTempDir: process.env.BUFFER_TEMP_DIR
+    ? path.resolve(process.env.BUFFER_TEMP_DIR, '.buffer_temp')
+    : path.resolve(ROOT_DIR, 'archive/.buffer_temp'),
+  lastActiveFile: process.env.BUFFER_TEMP_DIR
+    ? path.resolve(process.env.BUFFER_TEMP_DIR, '.last_active')
+    : path.resolve(ROOT_DIR, 'archive/.last_active'),
 
   // Regex
   regex: {
@@ -71,3 +94,9 @@ export const CONFIG = {
   mediaTypes: ['image', 'video'],
   ignoredTypes: ['audio', 'document', 'ptt', 'sticker'],
 };
+
+// Retorna o diretório de arquivo para um grupo, com fallback para archiveDir
+export function getArchiveDirForGroup(groupName) {
+  const specific = groupName && CONFIG.groupArchiveDirs[groupName.trim()];
+  return specific || CONFIG.archiveDir;
+}

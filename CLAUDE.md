@@ -34,6 +34,10 @@ Bot 100% passivo que monitora grupos WhatsApp e arquiva todas as mensagens (text
 - Se texto com protocolo chega do mesmo autor dentro do timeout → associa
 - Se timeout → flush: salva em `sem_legenda/` ou na pasta do protocolo
 - No shutdown (SIGINT/SIGTERM), flush de todos os buffers
+- **Detecção de novo lote**: se a nova mídia chegou mais de `INTRA_BUFFER_GAP_MS` após a última do mesmo autor, o buffer atual é flushado imediatamente e um novo lote começa — equivale à "linha vazia" do organizer offline. Padrão: 30s. Desativar: `INTRA_BUFFER_GAP_MS=0`
+- **Gap-flush sem protocolo**: salvo em `sem_legenda/{autor}/lote_YYYY-MM-DD_HH-MM-SS/` para revisão manual
+- **Associação retroativa (mesmo autor)**: após gap-flush, se o autor enviar o protocolo dentro do `BUFFER_TIMEOUT_MS`, os arquivos são movidos automaticamente para `{protocolo}/`
+- **Associação por reply**: qualquer pessoa pode responder uma foto (mesmo de outro autor) com o número do protocolo — o bot move as mídias para `{protocolo}/`. Requer que a foto ainda esteja em `sem_legenda/`. Mapa msgId→pasta persistido em `logs/msg_saved_map.json` (TTL 7 dias)
 - **Timeout por grupo** configurável via `GROUP_BUFFER_MS` no `.env`
   - `AGUA_TESTE_FEVEREIRO`: 10s (grupo de teste)
   - `Batedor Ambiental`: 300s (vídeos demoram mais para subir)

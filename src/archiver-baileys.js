@@ -17,10 +17,12 @@ import {
   fetchLatestBaileysVersion,
   DisconnectReason,
   downloadMediaMessage,
+  Browsers,
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { CONFIG } from './config.js';
 import { initAlerts, stopAlerts, addAlert } from './alerts.js';
 import { logEvent } from './eventlog.js';
@@ -29,9 +31,11 @@ import {
   saveBufferedBlock,
   extractProtocolo,
   extractAllProtocolos,
+  isProtocoloValido,
   saveTempMedia,
   saveTempMeta,
   loadPersistentBuffers,
+  moveToProtocol,
 } from './storage.js';
 import { tryReadBarcode } from './barcode.js';
 import { updateExcelRecord } from './excel.js';
@@ -48,18 +52,80 @@ let sock = null;
 let isConnected = false;
 let consecutiveFailures = 0;
 let healthCheckInterval = null;
-let catchupCutoff = 0;     // Timestamp mínimo para mensagens de catch-up
-let catchupActive = false; // Ativo durante janela de startup
+let diskCheckInterval = null;
+let catchupCutoff = 0;      // Timestamp mínimo para mensagens de catch-up
+let catchupActive = false;  // Ativo durante janela de startup
+let catchupCount = 0;       // Mensagens recuperadas no catch-up
 let shutdownRegistered = false;
 let pendingDriveWarning = null; // Aviso de drive indisponível no startup
 let lastDisconnectTime = 0;    // Para evitar spam de CONECTADO no eventlog
+let lastDisconnectCode = 0;    // Último código de desconexão (para backoff pós-440)
 
 const MAX_FAILURES = 3;
 const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
+// Loop de 440 detector
+const conflict440Timestamps = []; // timestamps de desconexões 440 recentes
+const MAX_440_IN_WINDOW = 5;
+const WINDOW_440_MS = 30 * 60 * 1000; // 30 min
+
+// Drives já alertados por pouco espaço (evita spam por sessão)
+const alertedDrives = new Set();
+
+// Lotes flushados por gap aguardando associação retroativa (mesmo autor)
+// bufferKey → { savedPath, groupName, authorName, expiresAt }
+const recentlyFlushed = new Map();
+
+// Mapa msgId → pasta salva (persistido em disco, TTL 7 dias)
+// Permite que qualquer pessoa responda uma foto com o protocolo
+const msgIdSavedMap = new Map();
+
 // Retorna o timeout de buffer para um grupo (pode ser sobrescrito por grupo no .env)
 function getBufferTimeout(groupName) {
   return CONFIG.groupBufferMs[groupName?.trim()] ?? CONFIG.bufferTimeoutMs;
+}
+
+// Formata o timestamp do primeiro item como nome de lote: lote_YYYY-MM-DD_HH-MM-SS
+function formatLoteName(date) {
+  const d = new Date(date);
+  const pad = n => String(n).padStart(2, '0');
+  return `lote_${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+}
+
+// ============================================
+// MSG-ID → PASTA SALVA (persistência em disco)
+// ============================================
+
+const MSG_ID_MAP_FILE = () => path.join(CONFIG.logsDir, 'msg_saved_map.json');
+const MSG_ID_MAP_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias
+
+function loadMsgIdMap() {
+  try {
+    const file = MSG_ID_MAP_FILE();
+    if (!fs.existsSync(file)) return;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const [id, entry] of Object.entries(raw)) {
+      msgIdSavedMap.set(id, entry);
+    }
+    console.log(`  [MsgMap] ${msgIdSavedMap.size} entradas carregadas.`);
+  } catch { /* best effort */ }
+}
+
+function cleanupMsgIdMap() {
+  const cutoff = Date.now() - MSG_ID_MAP_TTL_MS;
+  let removed = 0;
+  for (const [id, entry] of msgIdSavedMap) {
+    if (entry.savedAt < cutoff) { msgIdSavedMap.delete(id); removed++; }
+  }
+  if (removed > 0) console.log(`  [MsgMap] ${removed} entradas antigas removidas.`);
+}
+
+function persistMsgIdMap() {
+  try {
+    fs.mkdirSync(CONFIG.logsDir, { recursive: true });
+    const obj = Object.fromEntries(msgIdSavedMap);
+    fs.writeFileSync(MSG_ID_MAP_FILE(), JSON.stringify(obj), 'utf8');
+  } catch { /* best effort */ }
 }
 
 // Logger silencioso para Baileys (evita spam no console)
@@ -77,7 +143,7 @@ const noopLogger = {
 const PROCESSED_RETENTION_DAYS = 30;
 
 function loadProcessedIds() {
-  const logsDir = path.join(CONFIG.archiveDir, 'logs');
+  const logsDir = CONFIG.logsDir;
   if (!fs.existsSync(logsDir)) return;
   const today = new Date().toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
@@ -96,13 +162,13 @@ function loadProcessedIds() {
   // Limpa _processed.txt com mais de PROCESSED_RETENTION_DAYS dias
   try {
     const cutoff = Date.now() - PROCESSED_RETENTION_DAYS * 86400000;
-    const files = fs.readdirSync(logsDir).filter(f => f.endsWith('_processed.txt'));
+    const files = fs.readdirSync(CONFIG.logsDir).filter(f => f.endsWith('_processed.txt'));
     let deleted = 0;
     for (const file of files) {
       const dateStr = file.replace('_processed.txt', '');
       const fileDate = new Date(dateStr).getTime();
       if (!isNaN(fileDate) && fileDate < cutoff) {
-        fs.unlinkSync(path.join(logsDir, file));
+        fs.unlinkSync(path.join(CONFIG.logsDir, file));
         deleted++;
       }
     }
@@ -115,9 +181,8 @@ function markAsProcessed(msgId) {
   processedIds.add(msgId);
   try {
     const today = new Date().toISOString().slice(0, 10);
-    const logsDir = path.join(CONFIG.archiveDir, 'logs');
-    fs.mkdirSync(logsDir, { recursive: true });
-    fs.appendFileSync(path.join(logsDir, `${today}_processed.txt`), msgId + '\n');
+    fs.mkdirSync(CONFIG.logsDir, { recursive: true });
+    fs.appendFileSync(path.join(CONFIG.logsDir, `${today}_processed.txt`), msgId + '\n');
   } catch { /* best effort */ }
 }
 
@@ -160,6 +225,7 @@ function updateTempMeta(bufferKey, pending) {
         caption: i.caption || '',
         timestamp: i.timestamp instanceof Date ? i.timestamp.toISOString() : i.timestamp,
         barcode: i.barcode || null,
+        msgId: i.msgId || null,
       })),
     });
   } catch { /* best effort */ }
@@ -170,6 +236,9 @@ function updateTempMeta(bufferKey, pending) {
 // ============================================
 
 async function loadAndRestorePersistentBuffers() {
+  loadMsgIdMap();
+  cleanupMsgIdMap();
+
   const buffers = loadPersistentBuffers();
   if (buffers.length === 0) return;
 
@@ -238,9 +307,9 @@ async function connect() {
     auth: state,
     version,
     logger: noopLogger,
-    // Identifica como Chrome para o servidor WhatsApp
-    browser: ['WhatsApp Bila Organizer', 'Chrome', '120.0.0'],
-    syncFullHistory: false,
+    // Identifica como Desktop (não conflita com WhatsApp Web no navegador)
+    browser: Browsers.macOS('Desktop'),
+    syncFullHistory: true,
     generateHighQualityLinkPreview: false,
     // Necessário para retry de mensagens
     getMessage: async () => undefined,
@@ -272,14 +341,31 @@ async function handleConnectionUpdate({ connection, qr, lastDisconnect }) {
 
     const code = lastDisconnect?.error?.output?.statusCode;
     const reason = lastDisconnect?.error?.message || 'desconhecido';
+    lastDisconnectCode = code || 0;
     console.log(`  Conexão encerrada — código: ${code}, motivo: ${reason}`);
     logEvent('DESCONECTADO', `Conexão encerrada (código ${code})`, reason);
 
     if (code === DisconnectReason.loggedOut) {
       console.log('  Sessão expirada — limpe a pasta session/ e reinicie.');
+      writeSessionExpiredNotice('Sessão encerrada pelo WhatsApp (loggedOut)');
       await addAlert('erro', 'Sessão WhatsApp expirada. Limpe a pasta session/ e reinicie o bot.');
       stopAlerts();
       process.exit(1);
+    }
+
+    // Conflict (440): rastreia para detectar loop
+    if (code === 440) {
+      conflict440Timestamps.push(Date.now());
+      // Remove entradas mais antigas que a janela
+      const cutoff = Date.now() - WINDOW_440_MS;
+      while (conflict440Timestamps.length > 0 && conflict440Timestamps[0] < cutoff) {
+        conflict440Timestamps.shift();
+      }
+      console.log(`  [440] ${conflict440Timestamps.length}/${MAX_440_IN_WINDOW} conflitos na janela de 30min`);
+      if (conflict440Timestamps.length >= MAX_440_IN_WINDOW) {
+        await autoRecoverConflict();
+        return;
+      }
     }
 
     // restartRequired (515) é normal — reconecta silenciosamente
@@ -294,8 +380,11 @@ async function handleConnectionUpdate({ connection, qr, lastDisconnect }) {
     }
 
     // Conflict (440): outra sessão ativa — espera mais para o WhatsApp liberar
-    const delay = code === 440 ? 15000 : 3000;
-    await new Promise(r => setTimeout(r, delay));
+    // Jitter evita que múltiplos restarts batam exatamente no mesmo segundo
+    const baseDelay = code === 440 ? 30000 : 3000;
+    const jitter = Math.floor(Math.random() * 5000);
+    console.log(`  Aguardando ${(baseDelay + jitter) / 1000}s antes de reconectar...`);
+    await new Promise(r => setTimeout(r, baseDelay + jitter));
     await connect();
   }
 }
@@ -304,6 +393,7 @@ async function onReady() {
   console.log('  Bot conectado e pronto!\n');
   isConnected = true;
   consecutiveFailures = 0;
+  conflict440Timestamps.length = 0; // Reseta o contador de 440 ao conectar com sucesso
   // Só loga CONECTADO se ficou desconectado por mais de 10s (evita spam durante reconexões rápidas)
   if (Date.now() - lastDisconnectTime > 10000) {
     logEvent('CONECTADO', 'WhatsApp conectado com sucesso', `Arquivo: ${CONFIG.archiveDir}`);
@@ -318,9 +408,34 @@ async function onReady() {
   const lastActive = getLastActiveTime();
   updateLastActive();
 
+  // Backoff pós-440: aguarda 30s antes de buscar grupos para evitar rate-overlimit
+  if (lastDisconnectCode === 440) {
+    console.log('  [440] Aguardando 30s após conflito antes de buscar grupos...');
+    await new Promise(r => setTimeout(r, 30000));
+  }
+
+  // Busca grupos uma vez só — reutilizado em initAlerts e findGroups
+  let allGroupsCache = null;
+  const fetchGroupsCached = async () => {
+    if (!allGroupsCache) {
+      allGroupsCache = await sock.groupFetchAllParticipating();
+    }
+    return allGroupsCache;
+  };
+
   // Cria adapter compatível com alerts.js (mesma interface do whatsapp-web.js)
-  const clientAdapter = makeAlertsAdapter();
-  await initAlerts(clientAdapter);
+  const clientAdapter = makeAlertsAdapter(fetchGroupsCached);
+  try {
+    await initAlerts(clientAdapter);
+  } catch (err) {
+    if (err.message && err.message.toLowerCase().includes('rate')) {
+      console.warn('  initAlerts: rate limit detectado — aguardando 2min e tentando novamente...');
+      await new Promise(r => setTimeout(r, 2 * 60 * 1000));
+      await initAlerts(clientAdapter);
+    } else {
+      throw err;
+    }
+  }
   await addAlert('info', 'Bot iniciado com sucesso! (Baileys)');
 
   if (pendingDriveWarning) {
@@ -329,9 +444,10 @@ async function onReady() {
   }
 
   await loadAndRestorePersistentBuffers();
-  await findGroups();
+  await findGroups(fetchGroupsCached);
   await setupCatchup(lastActive);
   startHealthCheck();
+  startDiskCheck();
 
   console.log('\n  Monitorando mensagens... (Ctrl+C para parar)\n');
 }
@@ -340,10 +456,10 @@ async function onReady() {
  * Adapter que expõe a interface usada por alerts.js
  * usando as APIs do Baileys por baixo
  */
-function makeAlertsAdapter() {
+function makeAlertsAdapter(fetchGroupsCached) {
   return {
     getChats: async () => {
-      const groups = await sock.groupFetchAllParticipating();
+      const groups = await fetchGroupsCached();
       return Object.entries(groups).map(([jid, meta]) => ({
         id: { _serialized: jid, user: jid.split('@')[0] },
         name: meta.subject,
@@ -387,11 +503,16 @@ async function setupCatchup(lastActiveTime) {
 
   console.log(`  [Catch-up] Processando mensagens das últimas ${hours.toFixed(1)}h (via sync Baileys)...`);
 
-  // Desativa catch-up após 60s — WhatsApp envia histórico no início da sessão
+  catchupCount = 0;
+
+  // Desativa catch-up após 5min — syncFullHistory pode demorar mais para chegar
   setTimeout(() => {
     catchupActive = false;
-    console.log('  [Catch-up] Janela encerrada. Monitorando apenas mensagens novas.');
-  }, 60 * 1000);
+    console.log(`  [Catch-up] Janela encerrada. ${catchupCount} mensagem(ns) recuperada(s).`);
+    if (catchupCount === 0) {
+      addAlert('info', '⚠️ Catch-up encerrado sem mensagens recuperadas — WhatsApp não enviou histórico. Verifique manualmente.');
+    }
+  }, 5 * 60 * 1000);
 }
 
 // ============================================
@@ -418,6 +539,14 @@ function stopHealthCheck() {
     clearInterval(healthCheckInterval);
     healthCheckInterval = null;
   }
+  stopDiskCheck();
+}
+
+function stopDiskCheck() {
+  if (diskCheckInterval) {
+    clearInterval(diskCheckInterval);
+    diskCheckInterval = null;
+  }
 }
 
 async function autoRecover() {
@@ -441,6 +570,112 @@ async function autoRecover() {
   process.exit(1);
 }
 
+async function autoRecoverConflict() {
+  console.log(`  [440] Loop de conflito detectado (${MAX_440_IN_WINDOW}x em 30min) — limpando sessão...`);
+  logEvent('SESSAO_LIMPA', 'Loop de 440 detectado — sessão limpa automaticamente', `${MAX_440_IN_WINDOW} conflitos em 30min`);
+  try {
+    await addAlert('erro', `🔄 Loop de conflito (440) detectado ${MAX_440_IN_WINDOW}x em 30min — limpando sessão. Precisará escanear QR code.`);
+  } catch { /* best-effort */ }
+
+  stopHealthCheck();
+  await flushAllBuffers();
+  stopAlerts();
+
+  try { sock?.end(); } catch { /* ignora */ }
+
+  try {
+    fs.rmSync(CONFIG.sessionDir, { recursive: true, force: true });
+    console.log('  [440] Sessão limpa.');
+  } catch (e) {
+    console.error('  [440] Erro ao limpar sessão:', e.message);
+  }
+
+  writeSessionExpiredNotice(`Loop de conflito (440) ${MAX_440_IN_WINDOW}x em 30min — sessão limpa automaticamente`);
+  process.exit(1);
+}
+
+function writeSessionExpiredNotice(reason) {
+  try {
+    const logsDir = path.resolve(path.dirname(CONFIG.sessionDir), 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    const noticePath = path.join(logsDir, 'SESSAO_EXPIRADA.txt');
+    const now = new Date().toLocaleString('pt-BR');
+    const content = `[${now}] SESSÃO WHATSAPP EXPIRADA
+Motivo: ${reason}
+Ação necessária: escaneie o QR code para reconectar.
+  1. pm2 kill
+  2. Apague a pasta session/
+  3. pm2 start ecosystem.config.cjs
+  4. pm2 logs whatsapp-bila-organizer --raw
+`;
+    fs.writeFileSync(noticePath, content, 'utf8');
+    console.log(`  [Sessão] Aviso escrito em: ${noticePath}`);
+  } catch (e) {
+    console.error('  [Sessão] Erro ao escrever aviso de sessão expirada:', e.message);
+  }
+}
+
+async function checkDiskSpace() {
+  try {
+    const dirs = [CONFIG.archiveDir];
+    if (CONFIG.archiveFallbackDir) dirs.push(CONFIG.archiveFallbackDir);
+
+    // Extrai raízes únicas (letra de drive no Windows, ex: "Z:\")
+    const drives = new Set();
+    for (const dir of dirs) {
+      const match = dir.match(/^([A-Za-z]:\\)/);
+      if (match) {
+        drives.add(match[1]);
+      } else if (dir.startsWith('/')) {
+        drives.add('/');
+      }
+    }
+
+    for (const drive of drives) {
+      if (alertedDrives.has(drive)) continue;
+      let freeBytes = null;
+
+      // Tenta fs.statfsSync primeiro (Node 19+)
+      if (fs.statfsSync) {
+        try {
+          const stats = fs.statfsSync(drive);
+          freeBytes = stats.bavail * stats.bsize;
+        } catch { /* cai para wmic */ }
+      }
+
+      // Fallback: wmic (Windows)
+      if (freeBytes === null) {
+        try {
+          const driveId = drive.replace('\\', '').replace('/', '');
+          const output = execSync(
+            `wmic logicaldisk where "DeviceID='${driveId}'" get FreeSpace /value`,
+            { timeout: 5000, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+          );
+          const match = output.match(/FreeSpace=(\d+)/);
+          if (match) freeBytes = parseInt(match[1], 10);
+        } catch { /* melhor esforço */ }
+      }
+
+      if (freeBytes !== null) {
+        const freeGb = freeBytes / (1024 * 1024 * 1024);
+        if (freeGb < CONFIG.diskWarnGb) {
+          alertedDrives.add(drive);
+          await addAlert('erro', `💾 Disco ${drive} com pouco espaço: ${freeGb.toFixed(1)}GB livres (limite: ${CONFIG.diskWarnGb}GB)`);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('  [Disco] Erro ao verificar espaço em disco:', e.message);
+  }
+}
+
+function startDiskCheck() {
+  stopDiskCheck();
+  checkDiskSpace(); // Verifica imediatamente ao conectar
+  diskCheckInterval = setInterval(checkDiskSpace, 60 * 60 * 1000); // A cada 60 min
+  console.log('  [Disco] Verificação periódica de espaço ativa (60 min)');
+}
+
 // ============================================
 // GRACEFUL SHUTDOWN
 // ============================================
@@ -460,13 +695,15 @@ const shutdown = async () => {
 // ENCONTRAR GRUPOS
 // ============================================
 
-async function findGroups() {
+async function findGroups(fetchGroupsCached) {
   console.log('  Procurando grupos configurados...');
   const configuredNames = CONFIG.groups.map(g => g.trim().toLowerCase());
 
   let allGroups;
   try {
-    allGroups = await sock.groupFetchAllParticipating();
+    allGroups = fetchGroupsCached
+      ? await fetchGroupsCached()
+      : await sock.groupFetchAllParticipating();
   } catch (err) {
     console.error('  Erro ao buscar grupos:', err.message);
     return;
@@ -505,6 +742,7 @@ async function handleMessagesUpsert({ messages, type }) {
         // Histórico enviado pelo WhatsApp durante o sync inicial
         const msgTime = Number(msg.messageTimestamp) * 1000;
         if (msgTime >= catchupCutoff) {
+          catchupCount++;
           await handleMessage(msg);
         }
       }
@@ -518,15 +756,20 @@ async function handleMessage(msg) {
   // Ignora mensagens próprias e status
   if (msg.key.fromMe) return;
   const chatId = msg.key.remoteJid;
-  if (!chatId || !chatId.endsWith('@g.us')) return;
-  if (!monitoredGroups.has(chatId)) return;
+  if (!chatId) return;
+
+  const isGroup = chatId.endsWith('@g.us');
+  const isPrivate = chatId.endsWith('@s.whatsapp.net') || chatId.endsWith('@c.us');
+
+  if (isGroup && !monitoredGroups.has(chatId)) return;
+  if (!isGroup && !isPrivate) return;
 
   // Deduplicação
   const msgId = msg.key.id;
   if (msgId && processedIds.has(msgId)) return;
 
-  const groupName = monitoredGroups.get(chatId);
-  const authorId = msg.key.participant || chatId;
+  const groupName = isGroup ? monitoredGroups.get(chatId) : '_privado';
+  const authorId = isGroup ? (msg.key.participant || chatId) : chatId;
   const author = msg.pushName || authorId.split('@')[0] || 'desconhecido';
   const timestamp = new Date(Number(msg.messageTimestamp) * 1000);
 
@@ -548,7 +791,8 @@ async function handleMessage(msg) {
       await addAlert('info', `📎 ${author} enviou mídia como documento em ${groupName} (${mime}) — não arquivada automaticamente. Verifique manualmente.`);
     }
   } else if (textRaw) {
-    await handleTextMessage(textRaw, groupName, author, authorId, chatId, timestamp);
+    const quotedMsgId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId || null;
+    await handleTextMessage(textRaw, groupName, author, authorId, chatId, timestamp, quotedMsgId);
   }
 
   markAsProcessed(msgId);
@@ -558,12 +802,57 @@ async function handleMessage(msg) {
 // MENSAGEM DE TEXTO
 // ============================================
 
-async function handleTextMessage(text, groupName, author, authorId, chatId, timestamp) {
+async function handleTextMessage(text, groupName, author, authorId, chatId, timestamp, quotedMsgId = null) {
   saveTextMessage(groupName, author, text, timestamp);
 
   const protocolo = extractProtocolo(text);
   if (protocolo) {
     const bufferKey = `${chatId}:${authorId}`;
+
+    // ── 1. REPLY: qualquer pessoa respondeu uma foto com protocolo ──────────
+    if (quotedMsgId && isProtocoloValido(protocolo)) {
+      const saved = msgIdSavedMap.get(quotedMsgId);
+      if (saved && saved.folderPath && saved.folderPath.includes('sem_legenda')) {
+        const { moved, destPath } = await moveToProtocol(saved.folderPath, protocolo, saved.groupName);
+        if (moved > 0) {
+          console.log(`  [Reply] ${author}: ${moved} mídia(s) de ${saved.authorName} movidas → ${protocolo}`);
+          await addAlert('salvo_sucesso', `[${saved.authorName}][${moved} → ${protocolo}] ${saved.groupName} (via resposta de ${author})`);
+          // Atualiza entradas do mapa para apontar para o novo destino
+          for (const [id, entry] of msgIdSavedMap) {
+            if (entry.folderPath === saved.folderPath) {
+              entry.folderPath = destPath;
+            }
+          }
+          persistMsgIdMap();
+          const isManutenção = saved.groupName?.trim().toLowerCase().startsWith('manutenção');
+          if (CONFIG.excelFileId && isManutenção) await updateExcelRecord(protocolo, moved);
+          return;
+        }
+      }
+    }
+
+    // ── 2. RETROATIVO: mesmo autor enviou protocolo logo após gap-flush ─────
+    if (isProtocoloValido(protocolo)) {
+      const recent = recentlyFlushed.get(bufferKey);
+      if (recent && recent.expiresAt > Date.now()) {
+        const { moved, destPath } = await moveToProtocol(recent.savedPath, protocolo, recent.groupName);
+        if (moved > 0) {
+          recentlyFlushed.delete(bufferKey);
+          console.log(`  [Retroativo] ${author}: ${moved} mídia(s) movidas → ${protocolo}`);
+          await addAlert('salvo_sucesso', `[${author}][${moved} → ${protocolo}] ${groupName} (lote retroativo)`);
+          // Atualiza mapa de msgIds para apontar pro novo destino
+          for (const [id, entry] of msgIdSavedMap) {
+            if (entry.folderPath === recent.savedPath) entry.folderPath = destPath;
+          }
+          persistMsgIdMap();
+          const isManutenção = groupName?.trim().toLowerCase().startsWith('manutenção');
+          if (CONFIG.excelFileId && isManutenção) await updateExcelRecord(protocolo, moved);
+          // Não retorna: protocolo também vai pro buffer ativo se houver
+        }
+      }
+    }
+
+    // ── 3. NORMAL: associa protocolo ao buffer ativo ─────────────────────────
     const pending = pendingBuffer.get(bufferKey);
 
     if (pending && pending.items.length > 0) {
@@ -608,15 +897,18 @@ async function handleMediaMessage(msg, content, groupName, author, authorId, cha
 
   let buffer;
   try {
-    buffer = await downloadMediaMessage(
-      msg,
-      'buffer',
-      {},
-      { logger: noopLogger, reuploadRequest: sock.updateMediaMessage }
-    );
-  } catch (err) {
-    console.error(`  [${groupName}] Erro ao baixar mídia de ${author}:`, err.message);
-    return;
+    buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: noopLogger, reuploadRequest: sock.updateMediaMessage });
+  } catch (firstErr) {
+    // reuploadRequest interno só cobre ausência de conteúdo, não falhas HTTP.
+    // Para encaminhamentos com URL expirada, pede nova URL explicitamente e tenta de novo.
+    try {
+      const updatedMsg = await sock.updateMediaMessage(msg);
+      buffer = await downloadMediaMessage(updatedMsg, 'buffer', {}, { logger: noopLogger });
+    } catch (retryErr) {
+      console.error(`  [${groupName}] Erro ao baixar mídia de ${author}:`, firstErr.message);
+      await addAlert('erro', `📵 Mídia de ${author} em ${groupName} não pôde ser baixada (URL expirada/indisponível). Peça para reenviar.`);
+      return;
+    }
   }
 
   if (!buffer || buffer.length === 0) {
@@ -636,6 +928,20 @@ async function handleMediaMessage(msg, content, groupName, author, authorId, cha
   const bufferKey = `${chatId}:${authorId}`;
 
   let pending = pendingBuffer.get(bufferKey);
+
+  // Detecção de novo lote: se a última mídia foi enviada há mais de intraBufGapMs,
+  // flush imediato do buffer atual e começa lote novo — equivale à "linha vazia" do organizer
+  if (pending && pending.items.length > 0 && CONFIG.intraBufGapMs > 0) {
+    const lastTimestamp = pending.items[pending.items.length - 1].timestamp;
+    const gapMs = timestamp - lastTimestamp;
+    if (gapMs > CONFIG.intraBufGapMs) {
+      const gapSec = Math.round(gapMs / 1000);
+      console.log(`  [${groupName}] ${author}: gap de ${gapSec}s detectado → flush do lote anterior (${pending.items.length} item(s)) e novo lote`);
+      await flushBuffer(bufferKey, true);
+      pending = null;
+    }
+  }
+
   if (!pending) {
     pending = { items: [], protocolos: new Set(), timer: null, groupName, authorName: author };
     pendingBuffer.set(bufferKey, pending);
@@ -648,7 +954,8 @@ async function handleMediaMessage(msg, content, groupName, author, authorId, cha
   const base64 = buffer.toString('base64');
   const tempFilePath = saveTempMedia(bufferKey, seqNumber, base64, mimetype);
 
-  pending.items.push({ filePath: tempFilePath, mimetype, caption, timestamp, barcode });
+  const msgId = msg.key.id || null;
+  pending.items.push({ filePath: tempFilePath, mimetype, caption, timestamp, barcode, msgId });
   updateTempMeta(bufferKey, pending);
 
   const protoInfo = protocolosCaption.length > 0
@@ -663,7 +970,7 @@ async function handleMediaMessage(msg, content, groupName, author, authorId, cha
 // FLUSH BUFFER
 // ============================================
 
-async function flushBuffer(bufferKey) {
+async function flushBuffer(bufferKey, isGapFlush = false) {
   const pending = pendingBuffer.get(bufferKey);
   if (!pending) return;
 
@@ -692,9 +999,44 @@ async function flushBuffer(bufferKey) {
     }
   }
 
-  console.log(`  [${pending.groupName}] ${pending.authorName}: processando bloco — ${pending.items.length} mídia(s), ${protocolos.length} protocolo(s)${protocolos.length > 0 ? ` (${protocolos.join(', ')})` : ''}`);
+  // Gap-flush sem protocolo: salva em subpasta datada para revisão manual
+  const loteFolder = (isGapFlush && protocolos.length === 0)
+    ? formatLoteName(pending.items[0].timestamp)
+    : undefined;
 
-  const { protocolosValidos, salvos } = await saveBufferedBlock(pending.groupName, pending.authorName, pending.items, protocolos, bufferKey);
+  console.log(`  [${pending.groupName}] ${pending.authorName}: processando bloco — ${pending.items.length} mídia(s), ${protocolos.length} protocolo(s)${protocolos.length > 0 ? ` (${protocolos.join(', ')})` : ''}${loteFolder ? ` [gap → ${loteFolder}]` : ''}`);
+
+  const { protocolosValidos, salvos, pastaDestino } = await saveBufferedBlock(
+    pending.groupName, pending.authorName, pending.items, protocolos, bufferKey,
+    loteFolder ? { loteFolder } : {}
+  );
+
+  // Registra msgIds no mapa para associação retroativa via reply
+  let mapUpdated = false;
+  for (const item of pending.items) {
+    if (item.msgId && pastaDestino) {
+      msgIdSavedMap.set(item.msgId, {
+        folderPath: pastaDestino,
+        groupName: pending.groupName,
+        authorName: pending.authorName,
+        savedAt: Date.now(),
+      });
+      mapUpdated = true;
+    }
+  }
+  if (mapUpdated) persistMsgIdMap();
+
+  // Gap-flush sem protocolo: registra em recentlyFlushed para associação pelo mesmo autor
+  if (loteFolder && pastaDestino) {
+    const timeoutMs = getBufferTimeout(pending.groupName);
+    recentlyFlushed.set(bufferKey, {
+      savedPath: pastaDestino,
+      groupName: pending.groupName,
+      authorName: pending.authorName,
+      expiresAt: Date.now() + timeoutMs,
+    });
+    setTimeout(() => recentlyFlushed.delete(bufferKey), timeoutMs + 1000);
+  }
 
   // Atualiza planilha Excel apenas para o grupo Manutenção
   const isManutenção = pending.groupName?.trim().toLowerCase().startsWith('manutenção');

@@ -1,10 +1,30 @@
 import fs from 'fs';
 import path from 'path';
-import { CONFIG } from './config.js';
+import { CONFIG, getArchiveDirForGroup } from './config.js';
 import { addAlert, registrarContagem } from './alerts.js';
+import { logEvent } from './eventlog.js';
 
 // Contador sequencial por pasta (para naming)
 const seqCounters = new Map();
+
+// ============================================
+// FALLBACK DE DISCO CHEIO (runtime)
+// ============================================
+
+let fallbackActive = false;
+
+async function activateFallback(failedDir) {
+  if (fallbackActive || !CONFIG.archiveFallbackDir) return false;
+  fallbackActive = true;
+  // Sobrescreve todos os dirs de grupo e o dir padrão para o fallback
+  for (const key of Object.keys(CONFIG.groupArchiveDirs)) {
+    CONFIG.groupArchiveDirs[key] = CONFIG.archiveFallbackDir;
+  }
+  CONFIG.archiveDir = CONFIG.archiveFallbackDir;
+  logEvent('DRIVE_FALLBACK', 'Disco cheio durante operação — usando caminho reserva', `${failedDir} → ${CONFIG.archiveFallbackDir}`);
+  await addAlert('erro', `💾 Disco cheio em ${failedDir} — redirecionando automaticamente para: ${CONFIG.archiveFallbackDir}`);
+  return true;
+}
 
 // ============================================
 // FUNÇÕES UTILITÁRIAS (baseadas no whatsapp-organizer.js)
@@ -85,7 +105,7 @@ export function isProtocoloValido(numero) {
 export function saveTextMessage(groupName, author, text, timestamp) {
   const groupDir = sanitizarNomeGrupo(groupName);
   const dateStr = getDateStr(timestamp);
-  const msgDir = path.join(CONFIG.archiveDir, groupDir, dateStr);
+  const msgDir = path.join(getArchiveDirForGroup(groupName), groupDir, dateStr);
   ensureDir(msgDir);
 
   const entry = {
@@ -169,9 +189,10 @@ function cleanTempDir(bufferKey, items = null) {
 
 // Processa bloco inteiro do autor (todas as mídias acumuladas no buffer)
 // Lógica igual ao organizer offline: analisa todos os protocolos do bloco
-export async function saveBufferedBlock(groupName, author, bufferedItems, protocolos, bufferKey = null) {
+export async function saveBufferedBlock(groupName, author, bufferedItems, protocolos, bufferKey = null, options = {}) {
   const groupDir = sanitizarNomeGrupo(groupName);
   const autorSanitizado = sanitizarNomeAutor(author);
+  const archiveDir = getArchiveDirForGroup(groupName);
 
   // Filtra protocolos válidos e inválidos
   const protocolosValidos = protocolos.filter(p => isProtocoloValido(p));
@@ -183,11 +204,11 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
 
   if (protocolosValidos.length === 1) {
     // Um protocolo válido — caso ideal, tudo vai junto
-    pastaDestino = path.join(CONFIG.archiveDir, groupDir, protocolosValidos[0]);
+    pastaDestino = path.join(archiveDir, groupDir, protocolosValidos[0]);
   } else if (protocolosValidos.length > 1) {
     // Múltiplos protocolos válidos — sem_legenda/{autor}/{proto1_proto2}/
     const nomePasta = protocolosValidos.join('_');
-    pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'sem_legenda', autorSanitizado, nomePasta);
+    pastaDestino = path.join(archiveDir, groupDir, 'sem_legenda', autorSanitizado, nomePasta);
 
     // Cria subpastas para cada protocolo
     for (const proto of protocolosValidos) {
@@ -199,14 +220,19 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
   } else if (protocolosInvalidos.length > 0) {
     // Só protocolos inválidos
     const nomePasta = protocolosInvalidos.join('_');
-    pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'protocolo_revisar', nomePasta);
+    pastaDestino = path.join(archiveDir, groupDir, 'protocolo_revisar', nomePasta);
     alertType = 'protocolo_revisar';
     alertMsg = `Protocolo(s) "${protocolosInvalidos.join(', ')}" fora do padrão 2025/2026 - ${author} em ${groupName}`;
   } else {
     // Sem protocolo nenhum
-    pastaDestino = path.join(CONFIG.archiveDir, groupDir, 'sem_legenda', autorSanitizado);
+    if (options.loteFolder) {
+      // Gap-flush: salva em subpasta datada para revisão manual
+      pastaDestino = path.join(archiveDir, groupDir, 'sem_legenda', autorSanitizado, options.loteFolder);
+    } else {
+      pastaDestino = path.join(archiveDir, groupDir, 'sem_legenda', autorSanitizado);
+    }
     alertType = 'buffer_timeout';
-    alertMsg = `${bufferedItems.length} mídia(s) sem legenda de ${author} em ${groupName} → sem_legenda/`;
+    alertMsg = `${bufferedItems.length} mídia(s) sem legenda de ${author} em ${groupName} → sem_legenda/${options.loteFolder ? options.loteFolder + '/' : ''}`;
   }
 
   ensureDir(pastaDestino);
@@ -237,8 +263,27 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
       // Loga no JSONL do dia
       saveTextMessage(groupName, author, `[mídia: ${fileName}]${item.caption ? ' ' + item.caption : ''}`, item.timestamp);
     } catch (err) {
-      erros++;
-      await addAlert('erro_salvar', `Erro ao salvar ${fileName} de ${author} em ${groupName}: ${err.message}`);
+      if (err.code === 'ENOSPC' && await activateFallback(pastaDestino)) {
+        // Disco cheio — tenta salvar no fallback
+        const newArchiveDir = getArchiveDirForGroup(groupName);
+        const newPasta = filePath.replace(archiveDir, newArchiveDir);
+        ensureDir(path.dirname(newPasta));
+        try {
+          if (item.filePath && fs.existsSync(item.filePath)) {
+            fs.copyFileSync(item.filePath, newPasta);
+          } else if (item.mediaData) {
+            fs.writeFileSync(newPasta, Buffer.from(item.mediaData, 'base64'));
+          }
+          salvos++;
+          saveTextMessage(groupName, author, `[mídia: ${fileName}]${item.caption ? ' ' + item.caption : ''}`, item.timestamp);
+        } catch (retryErr) {
+          erros++;
+          await addAlert('erro_salvar', `Erro ao salvar ${fileName} mesmo no fallback: ${retryErr.message}`);
+        }
+      } else {
+        erros++;
+        await addAlert('erro_salvar', `Erro ao salvar ${fileName} de ${author} em ${groupName}: ${err.message}`);
+      }
     }
   }
 
@@ -261,7 +306,59 @@ export async function saveBufferedBlock(groupName, author, bufferedItems, protoc
   // Limpa pasta temp após mover os arquivos (só os arquivos deste buffer)
   cleanTempDir(bufferKey, bufferedItems);
 
-  return { protocolosValidos, salvos };
+  return { protocolosValidos, salvos, pastaDestino };
+}
+
+// ============================================
+// MOVER LOTE PARA PASTA DE PROTOCOLO (retroativo)
+// ============================================
+
+export async function moveToProtocol(fromPath, protocolo, groupName) {
+  const archiveDir = getArchiveDirForGroup(groupName);
+  const groupDir = sanitizarNomeGrupo(groupName);
+  const destPath = path.join(archiveDir, groupDir, protocolo);
+
+  const MEDIA_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.3gp', '.mov']);
+
+  let entries;
+  try {
+    entries = fs.readdirSync(fromPath, { withFileTypes: true });
+  } catch {
+    return { moved: 0, destPath };
+  }
+
+  const mediaFiles = entries.filter(e => e.isFile() && MEDIA_EXTS.has(path.extname(e.name).toLowerCase()));
+  if (mediaFiles.length === 0) return { moved: 0, destPath };
+
+  ensureDir(destPath);
+
+  let moved = 0;
+  for (const entry of mediaFiles) {
+    const src = path.join(fromPath, entry.name);
+    let dst = path.join(destPath, entry.name);
+    // Evita colisão de nome
+    if (fs.existsSync(dst)) {
+      const ext = path.extname(entry.name);
+      const base = path.basename(entry.name, ext);
+      dst = path.join(destPath, `${base}_${Date.now()}${ext}`);
+    }
+    try {
+      fs.renameSync(src, dst);
+      moved++;
+    } catch {
+      // renameSync falha cross-drive — tenta copy+delete
+      try {
+        fs.copyFileSync(src, dst);
+        fs.unlinkSync(src);
+        moved++;
+      } catch { /* best effort */ }
+    }
+  }
+
+  // Remove pasta de origem se ficou vazia
+  try { fs.rmdirSync(fromPath); } catch {}
+
+  return { moved, destPath };
 }
 
 // ============================================

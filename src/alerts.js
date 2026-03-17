@@ -167,7 +167,7 @@ function scheduleDailyReport() {
 
 async function generateDailyReport() {
   const hoje = new Date().toISOString().slice(0, 10);
-  const logsDir = path.join(CONFIG.archiveDir, 'logs');
+  const logsDir = CONFIG.logsDir;
 
   if (!fs.existsSync(logsDir)) {
     fs.mkdirSync(logsDir, { recursive: true });

@@ -6,6 +6,6 @@ module.exports = {
     restart_delay: 5000,
     max_restarts: 20,
     max_memory_restart: '400M',  // reinicia se vazar memória
-    cron_restart: '30 7 * * *',  // reinicio preventivo todo dia às 7:30 (Brasília)
+    kill_timeout: 30000,         // aguarda 30s o processo anterior morrer antes de iniciar novo
   }],
 };
