@@ -1,4 +1,6 @@
-# WhatsApp Bot - Organizador de Fotos
+# WhatsApp Bot — Organizador de Fotos
+
+![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white) ![Claude API](https://img.shields.io/badge/Claude-API-blueviolet) ![Licença](https://img.shields.io/badge/licença-MIT-green)
 
 Bot de WhatsApp para receber e organizar fotos de colaboradores com validação automática de legendas.
 
@@ -8,15 +10,15 @@ Bot de WhatsApp para receber e organizar fotos de colaboradores com validação 
 - Valida o formato da legenda automaticamente
 - Exige mínimo de 3 fotos por lote
 - Salva fotos em pasta local organizada por data
-- Envia relatório diário por email
+- Envia relatório diário por e-mail
 - Controle de colaboradores autorizados via JSON
 - Respostas inteligentes com Claude AI (opcional)
 
 ## Stack
 
 - **Node.js** + **whatsapp-web.js**
-- **Claude API** (Anthropic) para validação inteligente
-- **Nodemailer** para relatórios por email
+- **Anthropic Claude API** para validação inteligente
+- **Nodemailer** para relatórios por e-mail
 - **Puppeteer** para renderização do QR Code
 
 ## Instalação
@@ -29,7 +31,7 @@ npm install
 
 ## Configuração
 
-Copie `.env.example` para `.env` e preencha as variáveis:
+Copie `.env.example` para `.env` e preencha:
 
 ```env
 CLAUDE_API_KEY=sua_chave_aqui
@@ -45,20 +47,24 @@ npm start        # produção
 npm run dev      # desenvolvimento (hot reload)
 ```
 
-Escaneie o QR Code que aparecer no terminal com o WhatsApp.
+Escaneie o QR Code exibido no terminal com o WhatsApp.
 
 ## Estrutura
 
 ```
 src/
-├── bot/whatsapp.js        # Handler principal WhatsApp
+├── bot/whatsapp.js        # Handler principal do WhatsApp
 ├── config/
-│   ├── index.js           # Configurações
+│   ├── index.js           # Configurações gerais
 │   └── collaborators.json # Números autorizados
 ├── services/
 │   ├── claude.js          # Integração Claude API
-│   ├── email.js           # Relatórios por email
+│   ├── email.js           # Relatórios por e-mail
 │   ├── storage.js         # Salvamento de arquivos
 │   └── validator.js       # Validação de legendas
 └── index.js               # Ponto de entrada
 ```
+
+## Licença
+
+MIT
