@@ -2,7 +2,7 @@
 
 ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white) ![Claude API](https://img.shields.io/badge/Claude-API-blueviolet) ![Licença](https://img.shields.io/badge/licença-MIT-green)
 
-Bot de WhatsApp para receber e organizar fotos de colaboradores com validação automática de legendas.
+Bot de WhatsApp para receber, validar e organizar fotos enviadas por colaboradores, com verificação automática das legendas e geração de relatórios diários por e-mail.
 
 ## Funcionalidades
 
